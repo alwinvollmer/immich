@@ -100,5 +100,13 @@ merging a new upstream release. Back to stock = point `IMMICH_SERVER_IMAGE` at
   error `validation`); the stack bar shows all non-locked members; album/archive/photos
   timelines request `withStacked`.
 - Photos album filter (`albumIds`, ANY semantics) with localStorage selection, default "Camera".
+  Album-filtered timelines skip live websocket inserts (like `albumId` timelines).
+- Uploads into albums: drop files on a sidebar album or a Photos album chip (`use:albumDropTarget`;
+  the global drop overlay is a click-through hint), or Ctrl+V → `PasteUploadModal` (optional album).
+  Nothing is filed into Desktop automatically any more. Sidebar shows 5 recent albums.
+- Upscale: viewer ⋮ "Upscale ×2/×4" → `UpscaleService` (in-memory jobs, `on_upscale_update`
+  websocket events) → `UpscalePanel`; result = new stack cover with the original's metadata/tags.
 - Mobile app: background backup never assigns folder albums (only foreground sync does);
-  the "sync remote deletions" app setting breaks local sync → keep it OFF.
+  the "sync remote deletions" app setting breaks local sync → keep it OFF. Pasting several files
+  copied in Nautilus only yields the first one (Firefox/Zen limitation) → drag & drop instead.
+- Current deploy and roadmap state: `CUSTOM.md`; MCP memory project `immich` has the history.
