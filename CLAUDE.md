@@ -83,10 +83,15 @@ merging a new upstream release. Back to stock = point `IMMICH_SERVER_IMAGE` at
 
 ## External pieces (still outside the fork)
 
-- `C:\docker\immich-api-worker` (Python, port 7086): Danbooru tagging + waifu upscale via
-  two Immich workflows (webhooks). stack-tidy / desktop-tidy are OFF; stack_copy.py unused.
+- `C:\docker\immich-api-worker` (Python, port 7086): ONLY Danbooru tagging now (workflow
+  "Danbooru auto-tag" → webhook). Upscale, stack-tidy, desktop-tidy are OFF; stack_copy.py unused.
   Rebuild: `docker compose build --no-cache --pull=false && docker compose up -d --force-recreate`.
-- danbooru-tagger (:7860, with proxy) and anime-upscaler (:7085) — GPU services, stay separate.
+- danbooru-tagger (:7860, with proxy) and anime-upscaler (:7085, CPU mode) stay separate services.
+  anime-upscaler (`C:\docker\anime-upscaler\main.py`, bind-mounted → `docker compose restart`) has a
+  job API: `POST /jobs` (image, outscale) → id; `GET /jobs/{id}` (state, progress, tilesDone/Total,
+  position); `GET /jobs/{id}/result`; `DELETE /jobs/{id}` (a running job stops before its next tile).
+  Used by UpscaleService (`IMMICH_UPSCALER_URL`, default `http://host.docker.internal:7085`) and the
+  desktop's `~/.local/bin/wallpaper-upscale`.
 - Roadmap items 2–4 move the worker's glue into the server (see `CUSTOM.md`).
 
 ## Behaviour the fork relies on (don't break)

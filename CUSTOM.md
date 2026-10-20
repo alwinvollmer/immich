@@ -42,7 +42,7 @@ an optional album; 5 albums in the sidebar; archiving workaround removed.
    (album add-assets skips non-primary stack members), stack bar regardless of
    member visibility, stacks on the Archive page. Then drop the worker's
    stack-tidy and the stack-copy/trash design.
-2. **Upscale from the detail view** — a button in the asset viewer instead of the
+2. ~~**Upscale from the detail view**~~ DONE 2026-10-20 (e7d93c6, 1b6dfed: viewer menu Upscale ×2/×4, UpscalePanel; anime-upscaler job API with tile progress; tag workflow, --waifu-upscale tags and worker upscale removed) — a button in the asset viewer instead of the
    `--waifu-upscale-x2/x4` tag + workflow + worker; progress shown like the upload
    panel (reuse it as a job progress indicator). The server calls the
    anime-upscaler itself as a job.
