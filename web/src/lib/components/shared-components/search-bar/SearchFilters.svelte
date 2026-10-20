@@ -24,7 +24,6 @@
   import SearchTextSection from './SearchTextSection.svelte';
   import SearchDisplaySection from './SearchDisplaySection.svelte';
   import SearchRatingsSection from './SearchRatingsSection.svelte';
-  import SearchAlbumsSection from './SearchAlbumsSection.svelte';
   import { authManager } from '$lib/managers/auth-manager.svelte';
   import {
     getPeople,
@@ -233,7 +232,6 @@
           {/if}
         </div>
       {/if}
-      <SearchAlbumsSection />
       <div
         class="grid transition-[grid-template-rows] duration-200 ease-in-out {showAdvanced
           ? 'grid-rows-[1fr]'

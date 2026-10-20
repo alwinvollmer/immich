@@ -69,6 +69,11 @@ export class TimelineService extends BaseService {
       await this.requireAccess({ auth, permission: Permission.TagRead, ids: [dto.tagId] });
     }
 
+    // custom: albumIds only narrows the (user/partner) timeline, it never widens it
+    if (dto.albumIds?.length) {
+      await this.requireAccess({ auth, permission: Permission.AlbumRead, ids: dto.albumIds });
+    }
+
     if (auth.sharedLink && !auth.sharedLink.showExif) {
       dto.withCoordinates = false;
     }

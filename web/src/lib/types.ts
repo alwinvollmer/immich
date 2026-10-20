@@ -67,8 +67,6 @@ export type SearchFilter = {
   queryType: 'smart' | 'metadata' | 'description' | 'fullPath' | 'ocr';
   personIds: SvelteSet<string>;
   tagIds: SvelteSet<string> | null;
-  // custom: albums to search in (any of them); empty = all assets
-  albumIds: SvelteSet<string>;
   location: SearchLocationFilter;
   queryAssetId?: string;
   camera: SearchCameraFilter;

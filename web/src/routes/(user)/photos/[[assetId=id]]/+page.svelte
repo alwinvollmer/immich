@@ -31,13 +31,21 @@
   import { toTimelineAsset } from '$lib/utils/timeline-util';
   import { AssetVisibility } from '@immich/sdk';
   import MemoryCard from '$lib/components/memories/MemoryCard.svelte';
+  import PhotosAlbumFilter from '$lib/components/photos-page/PhotosAlbumFilter.svelte';
+  import { photosAlbumFilter } from '$lib/managers/photos-album-filter.svelte';
   import { ActionButton, CommandPaletteDefaultProvider, ImageCarousel } from '@immich/ui';
   import { mdiDotsVertical } from '@mdi/js';
   import { DateTime } from 'luxon';
   import { t } from 'svelte-i18n';
 
   let timelineManager = $state<TimelineManager>() as TimelineManager;
-  const options = { visibility: AssetVisibility.Timeline, withStacked: true, withPartners: true };
+  // custom: the album chips above the timeline narrow it to the ticked albums
+  const options = $derived({
+    visibility: AssetVisibility.Timeline,
+    withStacked: true,
+    withPartners: true,
+    albumIds: photosAlbumFilter.albumIds.length > 0 ? photosAlbumFilter.albumIds : undefined,
+  });
 
   let selectedAssets = $derived(assetMultiSelectManager.assets);
   let isLinkActionAvailable = $derived.by(() => {
@@ -99,6 +107,7 @@
     onEscape={handleEscape}
     withStacked
   >
+    <PhotosAlbumFilter />
     {#if authManager.preferences.memories.enabled}
       <ImageCarousel {items}>
         {#snippet child(item)}

@@ -8,50 +8,16 @@ import type { SearchFilter } from '$lib/types';
 import { asLocalTimeISO, parseUtcDate } from '$lib/utils/date-time';
 
 const QUERY_TYPE_STORAGE_KEY = 'searchQueryType';
-// custom: the album checklist selection, kept across searches and sessions
-const ALBUM_IDS_STORAGE_KEY = 'searchAlbumIds';
 
 class SearchManager {
-  #filter = $state<SearchFilter>(this.#fromQuery({}, true));
+  #filter = $state<SearchFilter>(this.#fromQuery({}));
 
   get filter() {
     return this.#filter;
   }
 
   reset() {
-    this.#filter = this.#fromQuery({}, true);
-  }
-
-  /** Whether an album selection was ever saved (if not, the album section applies its default) */
-  get hasSavedAlbumIds() {
-    return this.#savedAlbumIds() !== undefined;
-  }
-
-  setAlbumIds(albumIds: Iterable<string>) {
-    this.#filter.albumIds = new SvelteSet(albumIds);
-    this.#saveAlbumIds();
-  }
-
-  toggleAlbum(albumId: string) {
-    if (this.#filter.albumIds.has(albumId)) {
-      this.#filter.albumIds.delete(albumId);
-    } else {
-      this.#filter.albumIds.add(albumId);
-    }
-    this.#saveAlbumIds();
-  }
-
-  #saveAlbumIds() {
-    localStorage.setItem(ALBUM_IDS_STORAGE_KEY, JSON.stringify([...this.#filter.albumIds]));
-  }
-
-  #savedAlbumIds(): string[] | undefined {
-    try {
-      const value: unknown = JSON.parse(localStorage.getItem(ALBUM_IDS_STORAGE_KEY) ?? 'null');
-      return Array.isArray(value) ? value.filter((id): id is string => typeof id === 'string') : undefined;
-    } catch {
-      return undefined;
-    }
+    this.#filter = this.#fromQuery({});
   }
 
   setQuery(query: MetadataSearchDto | SmartSearchDto) {
@@ -67,8 +33,7 @@ class SearchManager {
     await goto(Route.search(this.#toQuery()));
   }
 
-  /** savedAlbums: start from the saved album selection instead of the query's albumIds */
-  #fromQuery(searchQuery: MetadataSearchDto | SmartSearchDto, savedAlbums = false): SearchFilter {
+  #fromQuery(searchQuery: MetadataSearchDto | SmartSearchDto): SearchFilter {
     let query = 'query' in searchQuery && searchQuery.query ? searchQuery.query : '';
     let queryType = query ? QueryType.SMART : this.#defaultQueryType();
 
@@ -104,7 +69,6 @@ class SearchManager {
             ? null
             : new SvelteSet(searchQuery.tagIds)
           : new SvelteSet(),
-      albumIds: new SvelteSet(savedAlbums ? (this.#savedAlbumIds() ?? []) : (searchQuery.albumIds ?? [])),
       location: {
         country: this.#withNullAsEmptyString(searchQuery.country),
         state: this.#withNullAsEmptyString(searchQuery.state),
@@ -168,7 +132,6 @@ class SearchManager {
       isNotInAlbum: this.filter.display.isNotInAlbum || undefined,
       personIds: this.filter.personIds.size > 0 ? [...this.filter.personIds] : undefined,
       tagIds: this.filter.tagIds === null ? null : this.filter.tagIds.size > 0 ? [...this.filter.tagIds] : undefined,
-      albumIds: this.filter.albumIds.size > 0 ? [...this.filter.albumIds] : undefined,
       type,
       rating: this.filter.rating,
     };

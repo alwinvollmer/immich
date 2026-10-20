@@ -304,6 +304,19 @@ export function inSharedAlbum(userId: string, assetId: 'asset.id' | 'asset_face.
   );
 }
 
+// custom: asset is in ANY of the albums; an EXISTS subquery so an asset in several
+// of them is not duplicated (timeline queries, Photos page album filter)
+export function inAnyAlbum<O>(qb: SelectQueryBuilder<DB, 'asset', O>, albumIds: string[]) {
+  return qb.where((eb) =>
+    eb.exists(
+      eb
+        .selectFrom('album_asset')
+        .whereRef('album_asset.assetId', '=', 'asset.id')
+        .where('album_asset.albumId', '=', anyUuid(albumIds)),
+    ),
+  );
+}
+
 // custom: the flat `albumIds` search filter matches assets in ANY of the albums
 // (upstream: in ALL of them). The web search album checklist relies on this.
 export function inAlbums<O>(qb: SelectQueryBuilder<DB, 'asset', O>, albumIds: string[]) {

@@ -78,7 +78,8 @@ export class TimelineManager extends VirtualScrollManager {
   initTask = new CancellableTask(
     () => {
       this.isInitialized = true;
-      if (this.#options.albumId || this.#options.personId) {
+      // custom: an albumIds-filtered timeline is album-scoped like albumId
+      if (this.#options.albumId || this.#options.albumIds?.length || this.#options.personId) {
         return;
       }
       this.connect();
@@ -116,7 +117,7 @@ export class TimelineManager extends VirtualScrollManager {
       eventManager.on({
         AssetUpdate: (asset: AssetResponseDto) => {
           const timelineAsset = toTimelineAsset(asset);
-          if (this.#options.albumId || this.#options.personId) {
+          if (this.#options.albumId || this.#options.albumIds?.length || this.#options.personId) {
             this.#updateAssets([timelineAsset]);
           } else {
             this.upsertAssets([timelineAsset]);
@@ -663,7 +664,12 @@ export class TimelineManager extends VirtualScrollManager {
     if (this.isExcluded(asset)) {
       return false;
     }
-    if (this.#options.albumId || this.#options.personId || this.#options.timelineAlbumId) {
+    if (
+      this.#options.albumId ||
+      this.#options.albumIds?.length ||
+      this.#options.personId ||
+      this.#options.timelineAlbumId
+    ) {
       return false;
     }
     if (this.#options.userId && !this.#options.withPartners && asset.ownerId !== this.#options.userId) {

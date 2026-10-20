@@ -37,6 +37,7 @@ import {
   anyUuid,
   asUuid,
   hasPeople,
+  inAnyAlbum,
   inSharedAlbum,
   removeUndefinedKeys,
   truncatedDate,
@@ -84,6 +85,8 @@ interface AssetBuilderOptions {
   isTrashed?: boolean;
   isDuplicate?: boolean;
   albumId?: string;
+  // custom: assets in ANY of these albums (Photos page album filter)
+  albumIds?: string[];
   tagId?: string;
   personId?: string;
   userIds?: string[];
@@ -779,6 +782,7 @@ export class AssetRepository {
               .innerJoin('album_asset', 'asset.id', 'album_asset.assetId')
               .where('album_asset.albumId', '=', asUuid(options.albumId!)),
           )
+          .$if(!!options.albumIds?.length, (qb) => inAnyAlbum(qb, options.albumIds!))
           .$if(!!options.personId, (qb) => hasPeople(qb, [options.personId!]))
           .$if(!!options.withStacked, (qb) =>
             qb
@@ -878,6 +882,7 @@ export class AssetRepository {
               ),
             ),
           )
+          .$if(!!options.albumIds?.length, (qb) => inAnyAlbum(qb, options.albumIds!))
           .$if(!!options.personId, (qb) => hasPeople(qb, [options.personId!]))
           .$if(!!options.userIds, (qb) =>
             qb.where((eb) => {
