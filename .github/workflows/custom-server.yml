@@ -22,13 +22,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # git describe needs the release tags
           persist-credentials: false
 
+      # The fork carries no upstream tags; server/package.json holds the release version.
       - name: Compute tags
         id: meta
         run: |
-          base=$(git describe --tags --abbrev=0)
+          base=v$(jq -r .version server/package.json)
           echo "version=${base}-custom-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
           echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/immich-server" >> "$GITHUB_OUTPUT"
 
