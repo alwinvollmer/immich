@@ -2,135 +2,41 @@
   import { page } from '$app/state';
   import { shouldIgnoreEvent } from '$lib/actions/shortcut';
   import { authManager } from '$lib/managers/auth-manager.svelte';
+  import { fileDropManager } from '$lib/managers/file-drop-manager.svelte';
   import { dragAndDropFilesStore } from '$lib/stores/drag-and-drop-files.store';
+  import { getFilesFromDataTransfer, hasFiles } from '$lib/utils/file-drop';
   import { fileUploadHandler } from '$lib/utils/file-uploader';
   import { isAlbumsRoute, isLockedFolderRoute } from '$lib/utils/navigation';
   import { Logo } from '@immich/ui';
   import { t } from 'svelte-i18n';
   import { fade } from 'svelte/transition';
 
+  // custom: the overlay is a click-through hint instead of a full-screen cover, so
+  // drops can land on album drop targets (sidebar albums, Photos album chips).
+  // A drop anywhere else uploads as before (into the album when on an album page).
+
   let albumId = $derived(isAlbumsRoute(page.route?.id) ? page.params.albumId : undefined);
   let isInLockedFolder = $derived(isLockedFolderRoute(page.route.id));
 
-  let dragStartTarget: EventTarget | null = $state(null);
   let isInternalDrag = false;
 
-  const onDragEnter = (e: DragEvent) => {
-    if (e.dataTransfer && e.dataTransfer.types.includes('Files')) {
-      dragStartTarget = e.target;
-    }
-  };
-
-  const onDragLeave = (e: DragEvent) => {
-    if (dragStartTarget === e.target) {
-      dragStartTarget = null;
-    }
-  };
-
-  const onDrop = async (e: DragEvent) => {
-    dragStartTarget = null;
-    await handleDataTransfer(e.dataTransfer);
-  };
-
-  const onPaste = (event: ClipboardEvent) => {
+  const onPaste = async (event: ClipboardEvent) => {
     if (shouldIgnoreEvent(event)) {
       return;
     }
 
-    return handleDataTransfer(event.clipboardData);
+    await handleFiles(await getFilesFromDataTransfer(event.clipboardData));
   };
 
-  const handleDataTransfer = async (dataTransfer?: DataTransfer | null) => {
-    if (!dataTransfer) {
+  const handleFiles = async (files: File[]) => {
+    if (files.length === 0) {
       return;
     }
 
-    if (!browserSupportsDirectoryUpload()) {
-      return handleFiles(dataTransfer.files);
-    }
-
-    const entries: FileSystemEntry[] = [];
-    const files: File[] = [];
-    for (const item of dataTransfer.items) {
-      // eslint-disable-next-line tscompat/tscompat
-      const entry = item.webkitGetAsEntry();
-      if (entry) {
-        entries.push(entry);
-        continue;
-      }
-
-      const file = item.getAsFile();
-      if (file) {
-        files.push(file);
-      }
-    }
-
-    const directoryFiles = await getAllFilesFromTransferEntries(entries);
-    return handleFiles([...files, ...directoryFiles]);
-  };
-
-  // eslint-disable-next-line tscompat/tscompat
-  const browserSupportsDirectoryUpload = () => typeof DataTransferItem.prototype.webkitGetAsEntry === 'function';
-
-  const getAllFilesFromTransferEntries = async (transferEntries: FileSystemEntry[]): Promise<File[]> => {
-    const allFiles: File[] = [];
-    let entriesToCheckForSubDirectories = [...transferEntries];
-    while (entriesToCheckForSubDirectories.length > 0) {
-      const currentEntry = entriesToCheckForSubDirectories.pop();
-
-      if (isFileSystemDirectoryEntry(currentEntry)) {
-        entriesToCheckForSubDirectories = entriesToCheckForSubDirectories.concat(
-          await getContentsFromFileSystemDirectoryEntry(currentEntry),
-        );
-      } else if (isFileSystemFileEntry(currentEntry)) {
-        allFiles.push(await getFileFromFileSystemEntry(currentEntry));
-      }
-    }
-
-    return allFiles;
-  };
-
-  const isFileSystemDirectoryEntry = (entry?: FileSystemEntry): entry is FileSystemDirectoryEntry =>
-    !!entry && entry.isDirectory;
-  const isFileSystemFileEntry = (entry?: FileSystemEntry): entry is FileSystemFileEntry => !!entry && entry.isFile;
-
-  const getFileFromFileSystemEntry = async (fileSystemFileEntry: FileSystemFileEntry): Promise<File> => {
-    return new Promise((resolve, reject) => {
-      fileSystemFileEntry.file(resolve, reject);
-    });
-  };
-
-  const readEntriesAsync = (reader: FileSystemDirectoryReader) => {
-    return new Promise<FileSystemEntry[]>((resolve, reject) => {
-      reader.readEntries(resolve, reject);
-    });
-  };
-
-  const getContentsFromFileSystemDirectoryEntry = async (
-    fileSystemDirectoryEntry: FileSystemDirectoryEntry,
-  ): Promise<FileSystemEntry[]> => {
-    const reader = fileSystemDirectoryEntry.createReader();
-    const files: FileSystemEntry[] = [];
-    let entries: FileSystemEntry[];
-
-    do {
-      entries = await readEntriesAsync(reader);
-      files.push(...entries);
-    } while (entries.length > 0);
-
-    return files;
-  };
-
-  const handleFiles = async (files?: FileList | File[]) => {
-    if (!files) {
-      return;
-    }
-
-    const filesArray: File[] = Array.from<File>(files);
     if (authManager.isSharedLink) {
-      dragAndDropFilesStore.set({ isDragging: true, files: filesArray });
+      dragAndDropFilesStore.set({ isDragging: true, files });
     } else {
-      await fileUploadHandler({ files: filesArray, albumId, isLockedAssets: isInLockedFolder });
+      await fileUploadHandler({ files, albumId, isLockedAssets: isInLockedFolder });
     }
   };
 
@@ -140,22 +46,33 @@
 
   const ondragend = () => {
     isInternalDrag = false;
+    fileDropManager.reset();
   };
 
   const ondragenter = (e: DragEvent) => {
-    if (isInternalDrag) {
+    if (isInternalDrag || !hasFiles(e.dataTransfer)) {
       return;
     }
 
     e.preventDefault();
-    e.stopPropagation();
-    onDragEnter(e);
+    fileDropManager.enter();
   };
 
   const ondragleave = (e: DragEvent) => {
+    if (isInternalDrag || !hasFiles(e.dataTransfer)) {
+      return;
+    }
+
+    fileDropManager.leave();
+  };
+
+  const ondragover = (e: DragEvent) => {
+    if (isInternalDrag || !hasFiles(e.dataTransfer)) {
+      return;
+    }
+
+    // allow dropping anywhere; album drop targets handle (and stop) their own drops
     e.preventDefault();
-    e.stopPropagation();
-    onDragLeave(e);
   };
 
   const ondrop = async (e: DragEvent) => {
@@ -165,27 +82,30 @@
 
     e.preventDefault();
     e.stopPropagation();
-    await onDrop(e);
-  };
-
-  const onDragOver = (e: DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
+    fileDropManager.reset();
+    await handleFiles(await getFilesFromDataTransfer(e.dataTransfer));
   };
 </script>
 
 <svelte:window onpaste={onPaste} />
 
-<svelte:body {ondragstart} {ondragend} {ondragenter} {ondragleave} {ondrop} />
+<svelte:body {ondragstart} {ondragend} {ondragenter} {ondragleave} {ondragover} {ondrop} />
 
-{#if dragStartTarget}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
+{#if fileDropManager.dragging}
   <div
-    class="fixed inset-0 flex size-full flex-col items-center justify-center bg-gray-100/90 text-immich-dark-gray dark:bg-immich-dark-bg/90 dark:text-immich-gray"
-    transition:fade={{ duration: 250 }}
-    ondragover={onDragOver}
+    class="pointer-events-none fixed inset-x-0 bottom-8 z-50 flex justify-center"
+    transition:fade={{ duration: 150 }}
   >
-    <Logo variant="icon" size="giant" class="m-16 animate-bounce" />
-    <div class="text-2xl">{$t('drop_files_to_upload')}</div>
+    <div
+      class="flex items-center gap-4 rounded-2xl bg-gray-100/95 px-6 py-4 text-immich-dark-gray shadow-lg ring-1 ring-primary/30 dark:bg-immich-dark-gray/95 dark:text-immich-gray"
+    >
+      <Logo variant="icon" size="medium" class="animate-bounce" />
+      <div>
+        <div class="text-lg font-medium">{$t('drop_files_to_upload')}</div>
+        <div class="text-sm opacity-80">
+          Drop onto an album in the sidebar or an album chip on Photos to upload into it
+        </div>
+      </div>
+    </div>
   </div>
 {/if}

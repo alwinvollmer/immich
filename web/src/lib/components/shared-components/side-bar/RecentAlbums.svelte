@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { albumDropTarget } from '$lib/actions/album-drop-target';
   import { Route } from '$lib/route';
   import { userInteraction } from '$lib/stores/user.svelte';
   import { getAssetMediaUrl } from '$lib/utils';
@@ -26,10 +27,12 @@
 </script>
 
 {#each albums as album (album.id)}
+  <!-- custom: drop files on an album to upload into it -->
   <a
     href={Route.viewAlbum(album)}
     title={album.albumName}
-    class="flex w-full place-items-center justify-between gap-4 rounded-e-full py-3 ps-10 transition-[padding] delay-100 duration-100 hover:cursor-pointer hover:bg-subtle hover:text-immich-primary group-hover:sm:px-10 md:px-10 dark:text-immich-dark-fg dark:hover:bg-immich-dark-gray dark:hover:text-immich-dark-primary"
+    use:albumDropTarget={album.id}
+    class="flex w-full place-items-center justify-between gap-4 rounded-e-full py-3 ps-10 transition-[padding] delay-100 duration-100 hover:cursor-pointer hover:bg-subtle hover:text-immich-primary data-drop-active:bg-primary/15 data-drop-active:ring-2 data-drop-active:ring-primary group-hover:sm:px-10 md:px-10 dark:text-immich-dark-fg dark:hover:bg-immich-dark-gray dark:hover:text-immich-dark-primary"
   >
     <div>
       <div
