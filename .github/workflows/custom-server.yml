@@ -6,6 +6,7 @@ name: Custom server image
 on:
   push:
     branches: [custom]
+    paths-ignore: ['**.md'] # docs-only commits do not need an image
   workflow_dispatch:
 
 permissions:
