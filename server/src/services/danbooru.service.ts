@@ -30,6 +30,11 @@ import { upsertTags } from 'src/utils/tag.js';
  * - CCIP embeddings are kept in files under `<media>/custom/ccip/` (not asset_metadata: that is
  *   synced to the mobile app); the person of a face is always read from the database, so edits
  *   in the UI (reassign, merge, rename) steer future matching.
+ *
+ * When there is nothing left to tag (and at most every IMMICH_DANBOORU_MAINTENANCE_HOURS), a
+ * maintenance pass runs: unassigned heads are paired with the whole-image faces of their image
+ * (characters seen for the first time on a multi-character image), then matched against all
+ * characters again (references grow), and the rest is clustered (CCIP OPTICS) into unnamed people.
  */
 const ENABLED = process.env.IMMICH_DANBOORU_ENABLED === '1';
 // The tagger is a plain-HTTP service on the Docker host. NOTE: `eslint --fix`
@@ -45,6 +50,10 @@ const INCLUDE_UNSORTED = process.env.IMMICH_DANBOORU_INCLUDE_UNSORTED !== '0';
 const THRESHOLDS = process.env.IMMICH_DANBOORU_THRESHOLDS || '{}';
 // cosine distance; mean of a character's 3 closest references (CCIP test: ~95 % correct, ~65 % assigned)
 const MATCH_DISTANCE = Number(process.env.IMMICH_DANBOORU_MATCH_DISTANCE || 0.21);
+// a head on an image whose characters pixai named only needs to be closer to one of them than this
+const PAIR_DISTANCE = MATCH_DISTANCE * 2;
+const CLUSTER_MIN = Number(process.env.IMMICH_DANBOORU_CLUSTER_MIN || 5);
+const MAINTENANCE_MS = Number(process.env.IMMICH_DANBOORU_MAINTENANCE_HOURS || 12) * 3_600_000;
 
 export const DANBOORU_MARKER_KEY = 'custom.danbooru';
 const SENTINEL_TAG = 'danbooru';
@@ -105,6 +114,7 @@ export class DanbooruService extends BaseService {
   private failed = new Set<string>();
   private index = new Map<string, IndexEntry>();
   private names = new Map<string, Map<string, string>>();
+  private lastMaintenance = 0;
 
   @OnEvent({ name: 'AppBootstrap', workers: [ImmichWorker.Microservices] })
   async onBootstrap() {
@@ -170,6 +180,14 @@ export class DanbooruService extends BaseService {
       }
 
       if (candidates.length === 0) {
+        if (Date.now() - this.lastMaintenance >= MAINTENANCE_MS) {
+          this.lastMaintenance = Date.now();
+          try {
+            await this.maintenance();
+          } catch (error) {
+            this.logger.error(`Danbooru maintenance failed: ${this.describe(error)}`);
+          }
+        }
         await this.pause(IDLE_MS);
         continue;
       }
@@ -413,6 +431,137 @@ export class DanbooruService extends BaseService {
       faces.push({ ...heads[head], personGroupId: best?.person ?? null });
     }
     return faces;
+  }
+
+  async maintenance() {
+    const owners = new Set(this.index.values().map(({ ownerId }) => ownerId));
+    for (const ownerId of owners) {
+      const stats = await this.maintainOwner(ownerId);
+      this.logger.log(
+        `Danbooru maintenance: ${stats.paired} heads paired with their image's characters, ` +
+          `${stats.matched} matched later, ${stats.clustered} grouped into ${stats.clusters} new unnamed people, ` +
+          `${stats.left} still unassigned`,
+      );
+    }
+  }
+
+  private async maintainOwner(ownerId: string) {
+    const stats = { paired: 0, matched: 0, clustered: 0, clusters: 0, left: 0 };
+    const faceIds = [...this.index].filter(([, entry]) => entry.ownerId === ownerId).map(([id]) => id);
+    const rows = await this.personRepository.getFacePersons(faceIds);
+    const references = new Map<string, Float32Array[]>();
+    const unassigned = new Map<string, string[]>();
+    for (const { id, personGroupId } of rows) {
+      const entry = this.index.get(id)!;
+      if (personGroupId) {
+        references.set(personGroupId, [...(references.get(personGroupId) ?? []), entry.vector]);
+      } else {
+        unassigned.set(entry.assetId, [...(unassigned.get(entry.assetId) ?? []), id]);
+      }
+    }
+
+    const affected = new Set<string>();
+    const remaining: string[] = [];
+    for (const [assetId, heads] of unassigned) {
+      const faces = await this.personRepository.getFaces(assetId, { viewingUserId: ownerId });
+      const present = new Set(faces.map(({ personGroupId }) => personGroupId).filter(Boolean));
+      const wholeImage = faces.filter(
+        (face) =>
+          face.sourceType === SourceType.Manual &&
+          face.personGroupId &&
+          face.boundingBoxX1 <= 1 &&
+          face.boundingBoxY1 <= 1 &&
+          face.boundingBoxX2 >= face.imageWidth - 1 &&
+          face.boundingBoxY2 >= face.imageHeight - 1,
+      );
+
+      // 1. heads ↔ the characters pixai named on this image (their whole-image faces)
+      const pairs: Array<{ head: string; face: (typeof wholeImage)[number]; distance: number }> = [];
+      for (const head of heads) {
+        for (const face of wholeImage) {
+          const refs = references.get(face.personGroupId!);
+          if (!refs?.length) {
+            continue;
+          }
+          const distance = distanceToReferences(this.index.get(head)!.vector, refs);
+          if (distance <= PAIR_DISTANCE) {
+            pairs.push({ head, face, distance });
+          }
+        }
+      }
+      pairs.sort((a, b) => a.distance - b.distance);
+      const freeHeads = new Set(heads);
+      const usedFaces = new Set<string>();
+      for (const { head, face } of pairs) {
+        if (!freeHeads.has(head) || usedFaces.has(face.id)) {
+          continue;
+        }
+
+        await this.personRepository.reassignFace(head, face.personGroupId!);
+        await this.personRepository.deleteAssetFace(face.id);
+        affected.add(face.personGroupId!);
+        freeHeads.delete(head);
+        usedFaces.add(face.id);
+        stats.paired++;
+      }
+
+      // 2. the rest: strict match against all characters not yet on this image
+      for (const head of freeHeads) {
+        let best: { person: string; distance: number } | undefined;
+        for (const [person, refs] of references) {
+          if (present.has(person) || refs.length < 2) {
+            continue;
+          }
+          const distance = distanceToReferences(this.index.get(head)!.vector, refs);
+          if (distance <= MATCH_DISTANCE && (!best || distance < best.distance)) {
+            best = { person, distance };
+          }
+        }
+        if (best) {
+          await this.personRepository.reassignFace(head, best.person);
+          present.add(best.person);
+          affected.add(best.person);
+          stats.matched++;
+        } else {
+          remaining.push(head);
+        }
+      }
+    }
+
+    // 3. cluster what is left into unnamed people (new characters to name)
+    if (remaining.length >= CLUSTER_MIN) {
+      const response = await fetch(`${TAGGER_URL}/v2/cluster`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          embeddings: remaining.map((id) => [...this.index.get(id)!.vector]),
+          min_samples: CLUSTER_MIN,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(`tagger cluster HTTP ${response.status}: ${await response.text()}`);
+      }
+      const { labels } = (await response.json()) as { labels: number[] };
+      const clusters = new Map<number, string[]>();
+      for (const [i, label] of labels.entries()) {
+        if (label >= 0) {
+          clusters.set(label, [...(clusters.get(label) ?? []), remaining[i]]);
+        }
+      }
+      for (const members of clusters.values()) {
+        const group = await this.personRepository.createGroup(ownerId);
+        await this.personRepository.create({ ownerId, personGroupId: group.id, name: '' });
+        for (const id of members) {
+          await this.personRepository.reassignFace(id, group.id);
+        }
+        affected.add(group.id);
+        stats.clusters++;
+        stats.clustered += members.length;
+      }
+    }
+    stats.left = remaining.length - stats.clustered;
+    await this.refreshFeaturePhotos(ownerId, affected);
+    return stats;
   }
 
   /** person (group id) with this exact name, created when missing */

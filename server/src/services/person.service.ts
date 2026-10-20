@@ -397,6 +397,12 @@ export class PersonService extends BaseService {
       return JobStatus.Skipped;
     }
 
+    // custom: real people only — with IMMICH_FACES_CAMERA_ONLY=1, images without a camera make
+    // (anime art, screenshots) are skipped; their characters come from DanbooruService
+    if (process.env.IMMICH_FACES_CAMERA_ONLY === '1' && !asset.exifInfo.make) {
+      return JobStatus.Skipped;
+    }
+
     const { imageHeight, imageWidth, faces } = await this.machineLearningRepository.detectFaces(
       previewFile.path,
       machineLearning.facialRecognition,

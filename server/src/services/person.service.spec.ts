@@ -1115,6 +1115,29 @@ describe(PersonService.name, () => {
       expect(mocks.machineLearning.detectFaces).not.toHaveBeenCalled();
     });
 
+    // custom: real people only (IMMICH_FACES_CAMERA_ONLY)
+    describe('camera-only mode', () => {
+      beforeEach(() => vi.stubEnv('IMMICH_FACES_CAMERA_ONLY', '1'));
+      afterEach(() => vi.unstubAllEnvs());
+
+      it('skips images without a camera make', async () => {
+        const asset = AssetFactory.from().file({ type: AssetFileType.Preview }).exif({ make: null }).build();
+        mocks.assetJob.getForDetectFacesJob.mockResolvedValue(getForDetectedFaces(asset));
+
+        await expect(sut.handleDetectFaces({ id: asset.id })).resolves.toBe(JobStatus.Skipped);
+        expect(mocks.machineLearning.detectFaces).not.toHaveBeenCalled();
+      });
+
+      it('detects faces on camera photos', async () => {
+        const asset = AssetFactory.from().file({ type: AssetFileType.Preview }).exif({ make: 'Nothing' }).build();
+        mocks.machineLearning.detectFaces.mockResolvedValue({ imageHeight: 500, imageWidth: 400, faces: [] });
+        mocks.assetJob.getForDetectFacesJob.mockResolvedValue(getForDetectedFaces(asset));
+
+        await sut.handleDetectFaces({ id: asset.id });
+        expect(mocks.machineLearning.detectFaces).toHaveBeenCalled();
+      });
+    });
+
     it('should handle no results', async () => {
       const start = Date.now();
       const asset = AssetFactory.from().file({ type: AssetFileType.Preview }).exif().build();

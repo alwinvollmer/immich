@@ -1,4 +1,5 @@
 // custom: Danbooru tagging (pixai-tagger-v1.0 + CCIP faces)
+import { readFile, readdir } from 'node:fs/promises';
 import { SourceType } from 'src/enum.js';
 import {
   DANBOORU_MARKER_KEY,
@@ -42,6 +43,29 @@ const result = (overrides: Partial<TaggerResult> = {}): TaggerResult => ({
   heads: [],
   ...overrides,
 });
+
+const wholeImageFace = (id: string, personGroupId: string) => ({
+  id,
+  personGroupId,
+  sourceType: SourceType.Manual,
+  imageWidth: 1000,
+  imageHeight: 800,
+  boundingBoxX1: 0,
+  boundingBoxY1: 0,
+  boundingBoxX2: 1000,
+  boundingBoxY2: 800,
+});
+
+const loadIndex = async (
+  sut: DanbooruService,
+  files: Record<string, { assetId: string; faces: Record<string, number[]> }>,
+) => {
+  vi.mocked(readdir).mockResolvedValue(Object.keys(files).map((name) => `${name}.json`) as never);
+  vi.mocked(readFile).mockImplementation((path) =>
+    Promise.resolve(JSON.stringify({ ...files[String(path).split('/').pop()!.replace('.json', '')], ownerId })),
+  );
+  await (sut as unknown as { loadIndex(): Promise<void> }).loadIndex();
+};
 
 describe(DanbooruService.name, () => {
   let sut: DanbooruService;
@@ -240,6 +264,61 @@ describe(DanbooruService.name, () => {
       await sut.processAsset(candidate);
 
       expect(mocks.tag.replaceAssetTags).toHaveBeenCalledWith('asset-1', ['t-mine', 't-1', 't-2', 't-3']);
+    });
+  });
+
+  describe('maintenance', () => {
+    it('pairs unassigned heads with the characters pixai named on the image', async () => {
+      await loadIndex(sut, {
+        refs: { assetId: 'refs', faces: { r1: axis(0), r2: axis(0, 0.05), r3: axis(3), r4: axis(3, 0.05) } },
+        multi: { assetId: 'multi', faces: { h1: axis(3, 0.02), h2: axis(0, 0.02) } },
+      });
+      mocks.person.getFacePersons.mockResolvedValue([
+        { id: 'r1', personGroupId: 'p-megumin', ownerId },
+        { id: 'r2', personGroupId: 'p-megumin', ownerId },
+        { id: 'r3', personGroupId: 'p-yunyun', ownerId },
+        { id: 'r4', personGroupId: 'p-yunyun', ownerId },
+        { id: 'h1', personGroupId: null, ownerId },
+        { id: 'h2', personGroupId: null, ownerId },
+      ]);
+      mocks.person.getFaces.mockResolvedValue([
+        wholeImageFace('w-megumin', 'p-megumin'),
+        wholeImageFace('w-yunyun', 'p-yunyun'),
+      ] as never);
+
+      await sut.maintenance();
+
+      expect(mocks.person.reassignFace).toHaveBeenCalledWith('h1', 'p-yunyun');
+      expect(mocks.person.reassignFace).toHaveBeenCalledWith('h2', 'p-megumin');
+      expect(mocks.person.deleteAssetFace).toHaveBeenCalledWith('w-megumin');
+      expect(mocks.person.deleteAssetFace).toHaveBeenCalledWith('w-yunyun');
+    });
+
+    it('matches a lone head later and clusters the unknown ones into an unnamed person', async () => {
+      const unknown = Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`u${i}`, axis(6, i * 0.01)]));
+      await loadIndex(sut, {
+        refs: { assetId: 'refs', faces: { r1: axis(0), r2: axis(0, 0.05) } },
+        lone: { assetId: 'lone', faces: { h1: axis(0, 0.02) } },
+        unknown: { assetId: 'unknown', faces: unknown },
+      });
+      mocks.person.getFacePersons.mockResolvedValue([
+        { id: 'r1', personGroupId: 'p-megumin', ownerId },
+        { id: 'r2', personGroupId: 'p-megumin', ownerId },
+        { id: 'h1', personGroupId: null, ownerId },
+        ...Object.keys(unknown).map((id) => ({ id, personGroupId: null, ownerId })),
+      ]);
+      mocks.person.getFaces.mockResolvedValue([]);
+      const fetchMock = vi.fn().mockResolvedValue(Response.json({ labels: [0, 0, 0, 0, 0] }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      await sut.maintenance();
+
+      expect(mocks.person.reassignFace).toHaveBeenCalledWith('h1', 'p-megumin');
+      expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/v2\/cluster$/), expect.anything());
+      expect(mocks.person.create).toHaveBeenCalledWith({ ownerId, personGroupId: 'p-new-1', name: '' });
+      for (const id of Object.keys(unknown)) {
+        expect(mocks.person.reassignFace).toHaveBeenCalledWith(id, 'p-new-1');
+      }
     });
   });
 });
