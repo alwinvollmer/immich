@@ -336,6 +336,8 @@ export class AssetService extends BaseService {
         await this.stackRepository.delete(asset.stack.id);
       } else if (asset.stack.primaryAssetId === id) {
         // the primary is being deleted but others remain: promote a new primary
+        // custom: the new cover takes over the old cover's albums (members are never in albums)
+        await this.albumRepository.copyAlbums({ sourceAssetId: id, targetAssetId: remainingStackAssetIds[0] });
         await this.stackRepository.update(asset.stack.id, {
           id: asset.stack.id,
           primaryAssetId: remainingStackAssetIds[0],

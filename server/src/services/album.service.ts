@@ -114,7 +114,9 @@ export class AlbumService extends BaseService {
       permission: Permission.AssetShare,
       ids: dto.assetIds || [],
     });
-    const assetIds = [...allowedAssetIdsSet].map((id) => id);
+    // custom: stack members other than the cover never go into albums
+    const stackMemberIds = await this.stackRepository.getNonPrimaryMemberIds([...allowedAssetIdsSet]);
+    const assetIds = [...allowedAssetIdsSet.difference(stackMemberIds)];
 
     const userMetadata = await this.userRepository.getMetadata(auth.user.id);
 
@@ -173,10 +175,21 @@ export class AlbumService extends BaseService {
     const album = await this.findOrFail(id, auth.user.id, { withAssets: false });
     await this.requireAccess({ auth, permission: Permission.AlbumAssetCreate, ids: [id] });
 
-    const results = await addAssets(
+    // custom: stack members other than the cover never go into albums; they are
+    // reported as failed (validation), e.g. to the mobile app's folder-album sync
+    const stackMemberIds = await this.stackRepository.getNonPrimaryMemberIds(dto.ids);
+    const addResults = await addAssets(
       auth,
       { access: this.accessRepository, bulk: this.albumRepository },
-      { parentId: id, assetIds: dto.ids, permission: Permission.AssetShare },
+      {
+        parentId: id,
+        assetIds: dto.ids.filter((assetId) => !stackMemberIds.has(assetId)),
+        permission: Permission.AssetShare,
+      },
+    );
+    const resultById = new Map(addResults.map((result) => [result.id, result]));
+    const results: BulkIdResponseDto[] = dto.ids.map(
+      (assetId) => resultById.get(assetId) ?? { id: assetId, success: false, error: BulkIdErrorReason.VALIDATION },
     );
 
     const { id: firstNewAssetId } = results.find(({ success }) => success) || {};
@@ -216,6 +229,15 @@ export class AlbumService extends BaseService {
     }
 
     const allowedAssetIds = await this.checkAccess({ auth, permission: Permission.AssetShare, ids: dto.assetIds });
+    // custom: stack members other than the cover never go into albums
+    const stackMemberIds = await this.stackRepository.getNonPrimaryMemberIds([...allowedAssetIds]);
+    if (allowedAssetIds.size > 0 && stackMemberIds.size === allowedAssetIds.size) {
+      results.error = BulkIdErrorReason.VALIDATION;
+      return results;
+    }
+    for (const stackMemberId of stackMemberIds) {
+      allowedAssetIds.delete(stackMemberId);
+    }
     if (allowedAssetIds.size === 0) {
       results.error = BulkIdErrorReason.NO_PERMISSION;
       return results;

@@ -6,7 +6,7 @@ import { columns } from 'src/database.js';
 import { DummyValue, GenerateSql } from 'src/decorators.js';
 import { DB } from 'src/schema/index.js';
 import { StackTable } from 'src/schema/tables/stack.table.js';
-import { asUuid, withDefaultVisibility } from 'src/utils/database.js';
+import { anyUuid, asUuid, withDefaultVisibility } from 'src/utils/database.js';
 
 export interface StackSearch {
   ownerId: string;
@@ -167,5 +167,43 @@ export class StackRepository {
   @GenerateSql({ params: [{ sourceId: DummyValue.UUID, targetId: DummyValue.UUID }] })
   merge({ sourceId, targetId }: { sourceId: string; targetId: string }) {
     return this.db.updateTable('asset').set({ stackId: targetId }).where('asset.stackId', '=', sourceId).execute();
+  }
+
+  // custom: stack album rule (StackAlbumService) — the cover and every other
+  // non-deleted member of a stack, regardless of visibility
+  async getAlbumRuleInfo(stackId: string): Promise<{ primaryAssetId: string; memberIds: string[] } | undefined> {
+    const stack = await this.db
+      .selectFrom('stack')
+      .select('primaryAssetId')
+      .where('id', '=', asUuid(stackId))
+      .executeTakeFirst();
+    if (!stack) {
+      return;
+    }
+
+    const members = await this.db
+      .selectFrom('asset')
+      .select('id')
+      .where('stackId', '=', asUuid(stackId))
+      .where('deletedAt', 'is', null)
+      .where('id', '!=', stack.primaryAssetId)
+      .execute();
+    return { primaryAssetId: stack.primaryAssetId, memberIds: members.map(({ id }) => id) };
+  }
+
+  // custom: which of these assets are stack members other than the cover (never allowed in albums)
+  async getNonPrimaryMemberIds(assetIds: string[]): Promise<Set<string>> {
+    if (assetIds.length === 0) {
+      return new Set();
+    }
+
+    const rows = await this.db
+      .selectFrom('asset')
+      .innerJoin('stack', 'stack.id', 'asset.stackId')
+      .select('asset.id')
+      .where('asset.id', '=', anyUuid(assetIds))
+      .whereRef('stack.primaryAssetId', '!=', 'asset.id')
+      .execute();
+    return new Set(rows.map(({ id }) => id));
   }
 }

@@ -611,7 +611,8 @@ export class AssetRepository {
                     .whereRef('stacked.stackId', '=', 'stack.id')
                     .whereRef('stacked.id', '!=', 'stack.primaryAssetId')
                     .where('stacked.deletedAt', 'is', null)
-                    .where('stacked.visibility', '=', AssetVisibility.Timeline)
+                    // custom: every member except locked ones (upstream: timeline only)
+                    .where('stacked.visibility', '!=', AssetVisibility.Locked)
                     .groupBy('stack.id')
                     .as('stacked_assets'),
                 (join) => join.on('stack.id', 'is not', null),
@@ -910,7 +911,8 @@ export class AssetRepository {
                     .select(sql`array[stacked."stackId"::text, count('stacked')::text]`.as('stack'))
                     .whereRef('stacked.stackId', '=', 'asset.stackId')
                     .where('stacked.deletedAt', 'is', null)
-                    .where('stacked.visibility', '=', AssetVisibility.Timeline)
+                    // custom: every member except locked ones (upstream: timeline only)
+                    .where('stacked.visibility', '!=', AssetVisibility.Locked)
                     .groupBy('stacked.stackId')
                     .as('stacked_assets'),
                 (join) => join.onTrue(),

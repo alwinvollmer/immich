@@ -27,7 +27,8 @@
 
   let { data }: Props = $props();
   let timelineManager = $state<TimelineManager>() as TimelineManager;
-  const options = { visibility: AssetVisibility.Archive };
+  // custom: stacks on the Archive page too (one tile per stack, stack bar in the viewer)
+  const options = { visibility: AssetVisibility.Archive, withStacked: true };
 
   const handleEscape = () => {
     if (!assetMultiSelectManager.selectionActive) {
@@ -52,6 +53,7 @@
     assetInteraction={assetMultiSelectManager}
     removeAction={AssetAction.UNARCHIVE}
     onEscape={handleEscape}
+    withStacked
   >
     {#snippet empty()}
       <EmptyPlaceholder text={$t('no_archived_assets_message')} class="mx-auto mt-10" />

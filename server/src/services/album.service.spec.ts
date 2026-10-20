@@ -18,6 +18,8 @@ describe(AlbumService.name, () => {
 
   beforeEach(() => {
     ({ sut, mocks } = newTestService(AlbumService));
+    // custom: by default no asset is a non-cover stack member
+    mocks.stack.getNonPrimaryMemberIds.mockResolvedValue(new Set());
   });
 
   it('should work', () => {
@@ -757,6 +759,27 @@ describe(AlbumService.name, () => {
   });
 
   describe('addAssets', () => {
+    it('custom: should refuse stack members other than the cover', async () => {
+      const owner = UserFactory.create({ isAdmin: true });
+      const album = AlbumFactory.from().owner(owner).build();
+      const [asset1, member, asset3] = [AssetFactory.create(), AssetFactory.create(), AssetFactory.create()];
+      mocks.access.album.checkOwnerAccess.mockResolvedValue(new Set([album.id]));
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset1.id, asset3.id]));
+      mocks.album.getById.mockResolvedValue(getForAlbum(album));
+      mocks.album.getAssetIds.mockResolvedValueOnce(new Set());
+      mocks.stack.getNonPrimaryMemberIds.mockResolvedValue(new Set([member.id]));
+
+      await expect(
+        sut.addAssets(AuthFactory.create(owner), album.id, { ids: [asset1.id, member.id, asset3.id] }),
+      ).resolves.toEqual([
+        { success: true, id: asset1.id },
+        { success: false, id: member.id, error: BulkIdErrorReason.VALIDATION },
+        { success: true, id: asset3.id },
+      ]);
+
+      expect(mocks.album.addAssetIds).toHaveBeenCalledWith(album.id, [asset1.id, asset3.id]);
+    });
+
     it('should allow the owner to add assets', async () => {
       const owner = UserFactory.create({ isAdmin: true });
       const album = AlbumFactory.from().owner(owner).build();
