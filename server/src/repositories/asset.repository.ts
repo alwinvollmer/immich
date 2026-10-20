@@ -1263,4 +1263,65 @@ export class AssetRepository {
       .where('asset.id', '=', id)
       .executeTakeFirstOrThrow();
   }
+
+  // custom: Danbooru tagging (DanbooruService) — images whose `custom.danbooru` marker is missing or
+  // names another model, newest first, with their unedited preview (faces live in unedited coordinates).
+  // Album filter: images in no album at all (unless includeUnsorted is false), or in at least one album
+  // with one of these names.
+  getDanbooruCandidates({
+    model,
+    albumNames,
+    includeUnsorted,
+    limit,
+  }: {
+    model: string;
+    albumNames: string[];
+    includeUnsorted: boolean;
+    limit: number;
+  }) {
+    const lowerNames = albumNames.map((name) => name.toLowerCase());
+    return this.db
+      .selectFrom('asset')
+      .innerJoin('asset_file', (join) =>
+        join
+          .onRef('asset_file.assetId', '=', 'asset.id')
+          .on('asset_file.type', '=', sql.lit(AssetFileType.Preview))
+          .on('asset_file.isEdited', '=', sql.lit(false)),
+      )
+      .select(['asset.id', 'asset.ownerId', 'asset_file.path as previewPath'])
+      .where('asset.type', '=', sql.lit(AssetType.Image))
+      .where('asset.deletedAt', 'is', null)
+      .where('asset.visibility', 'in', [AssetVisibility.Timeline, AssetVisibility.Archive])
+      .where((eb) =>
+        eb.not(
+          eb.exists(
+            eb
+              .selectFrom('asset_metadata')
+              .whereRef('asset_metadata.assetId', '=', 'asset.id')
+              .where('asset_metadata.key', '=', 'custom.danbooru')
+              .where(sql<string>`asset_metadata.value->>'model'`, '=', model),
+          ),
+        ),
+      )
+      .$if(lowerNames.length > 0, (qb) =>
+        qb.where((eb) =>
+          eb.or([
+            ...(includeUnsorted
+              ? [eb.not(eb.exists(eb.selectFrom('album_asset').whereRef('album_asset.assetId', '=', 'asset.id')))]
+              : []),
+            eb.exists(
+              eb
+                .selectFrom('album_asset')
+                .innerJoin('album', 'album.id', 'album_asset.albumId')
+                .whereRef('album_asset.assetId', '=', 'asset.id')
+                .where('album.deletedAt', 'is', null)
+                .where(sql<string>`lower(album."albumName")`, 'in', lowerNames),
+            ),
+          ]),
+        ),
+      )
+      .orderBy('asset.createdAt', 'desc')
+      .limit(limit)
+      .execute();
+  }
 }

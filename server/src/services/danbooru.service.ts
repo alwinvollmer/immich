@@ -1,0 +1,465 @@
+import { Injectable } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
+import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
+import { StorageCore } from 'src/cores/storage.core.js';
+import { OnEvent } from 'src/decorators.js';
+import { ImmichWorker, JobName, SourceType } from 'src/enum.js';
+import { BaseService } from 'src/services/base.service.js';
+import { PersonService } from 'src/services/person.service.js';
+import { updateLockedColumns } from 'src/utils/database.js';
+import { upsertTags } from 'src/utils/tag.js';
+
+/**
+ * custom: Danbooru tagging with the anime tagger service (pixai-tagger-v1.0 + anime head
+ * detection + CCIP character embeddings), replacing immich-api-worker.
+ *
+ * A loop in the microservices worker picks images whose `custom.danbooru` marker is missing or
+ * names another model (so a new model remaps the whole library by itself), newest first, and
+ * restricted like before to images in no album or in one of the configured albums.
+ *
+ * Per image:
+ * - general tags → tags + the description; copyrights → `::series:<name>`; plus the `danbooru` tag.
+ *   An image without a marker loses all its tags first (they all came from the old tagger);
+ *   later runs only replace the tags listed in the marker.
+ * - characters → People. A head box gets the character whose reference embeddings are closest;
+ *   one head + one character pair directly; a character without a head gets a whole-image face
+ *   (as before); a head without a pixai character is matched against all known characters
+ *   (strict CCIP distance) or stays an unassigned face for clustering.
+ * - CCIP embeddings are kept in files under `<media>/custom/ccip/` (not asset_metadata: that is
+ *   synced to the mobile app); the person of a face is always read from the database, so edits
+ *   in the UI (reassign, merge, rename) steer future matching.
+ */
+const ENABLED = process.env.IMMICH_DANBOORU_ENABLED === '1';
+// The tagger is a plain-HTTP service on the Docker host. NOTE: `eslint --fix`
+// (unicorn/prefer-https) silently turns this into https, which breaks it.
+// eslint-disable-next-line unicorn/prefer-https
+const TAGGER_URL = (process.env.IMMICH_TAGGER_URL || 'http://host.docker.internal:7860').replace(/\/+$/, '');
+const ALBUM_NAMES = (process.env.IMMICH_DANBOORU_ALBUMS ?? 'Download,Reddit,9GAG,Desktop')
+  .split(',')
+  .map((name) => name.trim())
+  .filter(Boolean);
+// images in no album are tagged too (set to 0 to test on one album only)
+const INCLUDE_UNSORTED = process.env.IMMICH_DANBOORU_INCLUDE_UNSORTED !== '0';
+const THRESHOLDS = process.env.IMMICH_DANBOORU_THRESHOLDS || '{}';
+// cosine distance; mean of a character's 3 closest references (CCIP test: ~95 % correct, ~65 % assigned)
+const MATCH_DISTANCE = Number(process.env.IMMICH_DANBOORU_MATCH_DISTANCE || 0.21);
+
+export const DANBOORU_MARKER_KEY = 'custom.danbooru';
+const SENTINEL_TAG = 'danbooru';
+const SERIES_PREFIX = '::series:';
+const BATCH_SIZE = 20;
+const IDLE_MS = 30_000;
+const TAGGER_DOWN_MS = 60_000;
+
+type TaggerHead = { box: [number, number, number, number]; score: number; ccip: number[] };
+export type TaggerResult = {
+  model: string;
+  width: number;
+  height: number;
+  tags: Record<'general' | 'character' | 'copyright' | 'rating', Record<string, number>>;
+  heads: TaggerHead[];
+};
+type Marker = { model: string; at: string; tagIds: string[]; faceIds: string[] };
+type IndexEntry = { assetId: string; ownerId: string; vector: Float32Array };
+type Candidate = { id: string; ownerId: string; previewPath: string };
+type FaceBox = { x1: number; y1: number; x2: number; y2: number };
+type NewFace = { box: FaceBox; personGroupId: string | null; vector?: Float32Array };
+
+const normalize = (values: number[]) => {
+  const vector = Float32Array.from(values);
+  let norm = 0;
+  for (const value of vector) {
+    norm += value * value;
+  }
+  norm = Math.sqrt(norm) || 1;
+  for (let i = 0; i < vector.length; i++) {
+    vector[i] /= norm;
+  }
+  return vector;
+};
+
+const cosineDistance = (a: Float32Array, b: Float32Array) => {
+  let dot = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+  }
+  return 1 - dot;
+};
+
+/** mean distance to the 3 closest references (fewer when the character has fewer) */
+export const distanceToReferences = (vector: Float32Array, references: Float32Array[]) => {
+  const distances = references.map((reference) => cosineDistance(vector, reference)).sort((a, b) => a - b);
+  const closest = distances.slice(0, 3);
+  return closest.reduce((sum, value) => sum + value, 0) / closest.length;
+};
+
+export const cleanTagName = (name: string) => name.replaceAll('/', '_');
+export const personName = (tag: string) => tag.replaceAll('_', ' ');
+
+@Injectable()
+export class DanbooruService extends BaseService {
+  private stopped = false;
+  private running?: Promise<void>;
+  private failed = new Set<string>();
+  private index = new Map<string, IndexEntry>();
+  private names = new Map<string, Map<string, string>>();
+
+  @OnEvent({ name: 'AppBootstrap', workers: [ImmichWorker.Microservices] })
+  async onBootstrap() {
+    if (!ENABLED) {
+      return;
+    }
+    await this.loadIndex();
+    this.logger.log(
+      `Danbooru tagging on: ${TAGGER_URL}, albums [${ALBUM_NAMES.join(', ')}]` +
+        `${INCLUDE_UNSORTED ? ' + images in no album' : ''}, ${this.index.size} indexed faces`,
+    );
+    this.running = this.loop();
+  }
+
+  @OnEvent({ name: 'AppShutdown' })
+  async onShutdown() {
+    this.stopped = true;
+    await this.running;
+  }
+
+  private get indexFolder() {
+    return join(StorageCore.getMediaLocation(), 'custom', 'ccip');
+  }
+
+  private async loadIndex() {
+    await mkdir(this.indexFolder, { recursive: true });
+    for (const file of await readdir(this.indexFolder)) {
+      if (!file.endsWith('.json')) {
+        continue;
+      }
+      try {
+        const { assetId, ownerId, faces } = JSON.parse(await readFile(join(this.indexFolder, file), 'utf8')) as {
+          assetId: string;
+          ownerId: string;
+          faces: Record<string, number[]>;
+        };
+        for (const [faceId, values] of Object.entries(faces)) {
+          this.index.set(faceId, { assetId, ownerId, vector: normalize(values) });
+        }
+      } catch (error) {
+        this.logger.warn(`Skipping unreadable CCIP file ${file}: ${error}`);
+      }
+    }
+  }
+
+  private async loop() {
+    let done = 0;
+    while (!this.stopped) {
+      let candidates: Candidate[];
+      try {
+        const model = await this.taggerModel();
+        const rows = await this.assetRepository.getDanbooruCandidates({
+          model,
+          albumNames: ALBUM_NAMES,
+          includeUnsorted: INCLUDE_UNSORTED,
+          limit: BATCH_SIZE + this.failed.size,
+        });
+        candidates = rows.filter(({ id }) => !this.failed.has(id));
+      } catch (error) {
+        this.logger.warn(`Danbooru tagging paused, tagger unavailable: ${this.describe(error)}`);
+        await this.pause(TAGGER_DOWN_MS);
+        continue;
+      }
+
+      if (candidates.length === 0) {
+        await this.pause(IDLE_MS);
+        continue;
+      }
+
+      for (const candidate of candidates.slice(0, BATCH_SIZE)) {
+        if (this.stopped) {
+          break;
+        }
+        try {
+          await this.processAsset(candidate);
+          done++;
+          if (done % 50 === 0) {
+            this.logger.log(`Danbooru tagging: ${done} images done since start`);
+          }
+        } catch (error) {
+          this.logger.error(`Danbooru tagging of ${candidate.id} failed: ${this.describe(error)}`);
+          if (error instanceof TypeError) {
+            // fetch() failed: the tagger went away mid-batch — retry the image later
+            await this.pause(TAGGER_DOWN_MS);
+            break;
+          }
+          this.failed.add(candidate.id);
+        }
+      }
+    }
+  }
+
+  private async pause(ms: number) {
+    const step = 1000;
+    for (let waited = 0; waited < ms && !this.stopped; waited += step) {
+      await sleep(step);
+    }
+  }
+
+  private describe(error: unknown) {
+    // fetch() hides the network error in `cause` ("fetch failed")
+    const cause = error instanceof Error && error.cause ? `: ${String(error.cause)}` : '';
+    return `${error instanceof Error ? error.message : String(error)}${cause}`;
+  }
+
+  private async taggerModel(): Promise<string> {
+    const response = await fetch(`${TAGGER_URL}/v2/info`);
+    const info = (await response.json()) as { model: string; ready: boolean };
+    if (!response.ok || !info.ready) {
+      throw new Error(`tagger not ready (HTTP ${response.status})`);
+    }
+    return info.model;
+  }
+
+  private async analyze(image: Buffer): Promise<TaggerResult> {
+    const form = new FormData();
+    form.append('image', new Blob([new Uint8Array(image)]), 'preview');
+    form.append('thresholds', THRESHOLDS);
+    const response = await fetch(`${TAGGER_URL}/v2/analyze`, { method: 'POST', body: form });
+    if (!response.ok) {
+      throw new Error(`tagger HTTP ${response.status}: ${await response.text()}`);
+    }
+    return (await response.json()) as TaggerResult;
+  }
+
+  async processAsset({ id: assetId, ownerId, previewPath }: Candidate) {
+    const result = await this.analyze(await this.storageRepository.readFile(previewPath));
+    const previousRow = await this.assetRepository.getMetadataByKey(assetId, DANBOORU_MARKER_KEY);
+    const previous = previousRow?.value as Marker | undefined;
+
+    const tagIds = await this.applyTags(assetId, ownerId, result, previous);
+    const faceIds = await this.applyFaces(assetId, ownerId, result, previous);
+
+    const marker: Marker = { model: result.model, at: new Date().toISOString(), tagIds, faceIds };
+    await this.assetRepository.upsertMetadata(assetId, [{ key: DANBOORU_MARKER_KEY, value: marker }]);
+    this.logger.debug(
+      `Danbooru ${assetId}: ${tagIds.length} tags, characters [${Object.keys(result.tags.character).join(', ')}], ` +
+        `${result.heads.length} heads`,
+    );
+  }
+
+  private async applyTags(assetId: string, ownerId: string, result: TaggerResult, previous?: Marker) {
+    const general = Object.keys(result.tags.general).map((name) => cleanTagName(name));
+    const series = Object.keys(result.tags.copyright).map((name) => `${SERIES_PREFIX}${cleanTagName(name)}`);
+    const tags = await upsertTags(this.tagRepository, { userId: ownerId, tags: [...general, ...series, SENTINEL_TAG] });
+    const newIds = tags.map(({ id }) => id);
+
+    // no marker: every tag on the image came from the old tagger (verified 2026-10-20) → replace all
+    let keep: string[] = [];
+    if (previous) {
+      const old = new Set(previous.tagIds);
+      const current = await this.tagRepository.getAssetTagIds(assetId);
+      keep = current.filter((id) => !old.has(id));
+    }
+    await this.tagRepository.replaceAssetTags(assetId, [...new Set([...keep, ...newIds])]);
+
+    const { tags: values } = await this.assetRepository.getForUpdateTags(assetId);
+    await this.assetRepository.upsertExif({
+      exif: updateLockedColumns({
+        assetId,
+        description: general.join(', '),
+        tags: values.map(({ value }) => value),
+      }),
+      lockedPropertiesBehavior: 'append',
+    });
+    await this.jobRepository.queue({ name: JobName.SidecarWrite, data: { id: assetId } });
+    return newIds;
+  }
+
+  private async applyFaces(assetId: string, ownerId: string, result: TaggerResult, previous?: Marker) {
+    // replace our own faces: those from the last run and the old worker's whole-image boxes
+    const ours = new Set(previous?.faceIds);
+    const existing = await this.personRepository.getFaces(assetId, { viewingUserId: ownerId });
+    const affected = new Set<string>();
+    for (const face of existing) {
+      const wholeImage =
+        face.boundingBoxX1 <= 1 &&
+        face.boundingBoxY1 <= 1 &&
+        face.boundingBoxX2 >= face.imageWidth - 1 &&
+        face.boundingBoxY2 >= face.imageHeight - 1;
+      if (!(face.sourceType === SourceType.Manual && (ours.has(face.id) || wholeImage))) {
+        continue;
+      }
+
+      if (face.personGroupId) {
+        affected.add(face.personGroupId);
+      }
+      await this.personRepository.deleteAssetFace(face.id);
+      this.index.delete(face.id);
+    }
+
+    const references = await this.referencesFor(ownerId);
+    const faces = await this.assignFaces(ownerId, result, references);
+
+    const faceIds: string[] = [];
+    const vectors: Record<string, number[]> = {};
+    for (const face of faces) {
+      const id = randomUUID();
+      await this.personRepository.createAssetFace({
+        id,
+        assetId,
+        personGroupId: face.personGroupId,
+        imageWidth: result.width,
+        imageHeight: result.height,
+        boundingBoxX1: Math.round(face.box.x1),
+        boundingBoxY1: Math.round(face.box.y1),
+        boundingBoxX2: Math.round(face.box.x2),
+        boundingBoxY2: Math.round(face.box.y2),
+        sourceType: SourceType.Manual,
+      });
+      faceIds.push(id);
+      if (face.personGroupId) {
+        affected.add(face.personGroupId);
+      }
+      if (!face.vector) {
+        continue;
+      }
+
+      vectors[id] = Array.from(face.vector, (value) => Math.round(value * 1e6) / 1e6);
+      this.index.set(id, { assetId, ownerId, vector: face.vector });
+    }
+    await this.writeVectors(assetId, ownerId, vectors);
+    await this.refreshFeaturePhotos(ownerId, affected);
+    return faceIds;
+  }
+
+  /** CCIP references per person of this owner, from the current face → person assignments */
+  private async referencesFor(ownerId: string) {
+    const faceIds = [...this.index].filter(([, entry]) => entry.ownerId === ownerId).map(([id]) => id);
+    const references = new Map<string, Float32Array[]>();
+    for (const { id, personGroupId } of await this.personRepository.getFacePersons(faceIds)) {
+      const entry = this.index.get(id);
+      if (!personGroupId || !entry) {
+        continue;
+      }
+      const list = references.get(personGroupId) ?? [];
+      list.push(entry.vector);
+      references.set(personGroupId, list);
+    }
+    return references;
+  }
+
+  async assignFaces(ownerId: string, result: TaggerResult, references: Map<string, Float32Array[]>) {
+    const whole: FaceBox = { x1: 0, y1: 0, x2: result.width, y2: result.height };
+    const heads = result.heads.map((head) => ({
+      box: { x1: head.box[0], y1: head.box[1], x2: head.box[2], y2: head.box[3] },
+      vector: normalize(head.ccip),
+    }));
+    // sequential on purpose: personFor may create a person and caches the names
+    const characters = await Array.fromAsync(Object.keys(result.tags.character), (name) =>
+      this.personFor(ownerId, personName(name)),
+    );
+
+    const faces: NewFace[] = [];
+    const freeHeads = new Set(heads.keys());
+    const freeCharacters = new Set(characters);
+
+    // pixai characters → heads, closest reference distance first
+    const pairs: Array<{ head: number; person: string; distance: number }> = [];
+    for (const [head, { vector }] of heads.entries()) {
+      for (const person of characters) {
+        const refs = references.get(person);
+        if (refs?.length) {
+          pairs.push({ head, person, distance: distanceToReferences(vector, refs) });
+        }
+      }
+    }
+    pairs.sort((a, b) => a.distance - b.distance);
+    for (const { head, person } of pairs) {
+      if (!(freeHeads.has(head) && freeCharacters.has(person))) {
+        continue;
+      }
+
+      faces.push({ ...heads[head], personGroupId: person });
+      freeHeads.delete(head);
+      freeCharacters.delete(person);
+    }
+    // one head and one character left (e.g. a character seen for the first time): pair them
+    if (freeHeads.size === 1 && freeCharacters.size === 1) {
+      const [head] = freeHeads;
+      const [person] = freeCharacters;
+      faces.push({ ...heads[head], personGroupId: person });
+      freeHeads.clear();
+      freeCharacters.clear();
+    }
+    // characters without a head: whole-image face, as the old worker did
+    for (const person of freeCharacters) {
+      faces.push({ box: whole, personGroupId: person });
+    }
+    // heads without a pixai character: strict match against all known characters, else unassigned
+    const used = new Set(faces.map(({ personGroupId }) => personGroupId));
+    for (const head of freeHeads) {
+      let best: { person: string; distance: number } | undefined;
+      for (const [person, refs] of references) {
+        if (used.has(person) || refs.length < 2) {
+          continue;
+        }
+        const distance = distanceToReferences(heads[head].vector, refs);
+        if (distance <= MATCH_DISTANCE && (!best || distance < best.distance)) {
+          best = { person, distance };
+        }
+      }
+      if (best) {
+        used.add(best.person);
+      }
+      faces.push({ ...heads[head], personGroupId: best?.person ?? null });
+    }
+    return faces;
+  }
+
+  /** person (group id) with this exact name, created when missing */
+  private async personFor(ownerId: string, name: string): Promise<string> {
+    let names = this.names.get(ownerId);
+    if (!names) {
+      const people = await this.personRepository.getDistinctNames(ownerId, { withHidden: true });
+      names = new Map(people.map((person) => [person.name.toLowerCase(), person.personGroupId]));
+      this.names.set(ownerId, names);
+    }
+    const key = name.toLowerCase();
+    const known = names.get(key);
+    if (known) {
+      const person = await this.personRepository.getByGroupId({ ownerId, personGroupId: known });
+      if (person && person.name.toLowerCase() === key) {
+        return known;
+      }
+      // renamed or deleted in the meantime: reload the names once
+      this.names.delete(ownerId);
+      return this.personFor(ownerId, name);
+    }
+    const group = await this.personRepository.createGroup(ownerId);
+    await this.personRepository.create({ ownerId, personGroupId: group.id, name });
+    names.set(key, group.id);
+    return group.id;
+  }
+
+  private async refreshFeaturePhotos(ownerId: string, personGroupIds: Set<string>) {
+    const missing = [];
+    for (const personGroupId of personGroupIds) {
+      const person = await this.personRepository.getByGroupId({ ownerId, personGroupId });
+      if (person && !person.faceAssetId) {
+        missing.push({ ownerId, personGroupId });
+      }
+    }
+    if (missing.length > 0) {
+      await BaseService.create(PersonService, this).createNewFeaturePhoto(missing);
+    }
+  }
+
+  private async writeVectors(assetId: string, ownerId: string, faces: Record<string, number[]>) {
+    const path = join(this.indexFolder, `${assetId}.json`);
+    if (Object.keys(faces).length === 0) {
+      await rm(path, { force: true });
+      return;
+    }
+    await mkdir(this.indexFolder, { recursive: true });
+    await writeFile(path, JSON.stringify({ assetId, ownerId, faces }));
+  }
+}

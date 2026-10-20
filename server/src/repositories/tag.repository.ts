@@ -254,4 +254,10 @@ export class TagRepository {
       .selectAll()
       .executeTakeFirstOrThrow();
   }
+
+  // custom: ids of the tags on an asset (DanbooruService replaces only the tags it set itself)
+  async getAssetTagIds(assetId: string): Promise<string[]> {
+    const rows = await this.db.selectFrom('tag_asset').select('tagId').where('assetId', '=', assetId).execute();
+    return rows.map(({ tagId }) => tagId);
+  }
 }

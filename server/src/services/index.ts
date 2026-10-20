@@ -9,6 +9,7 @@ import { AuthAdminService } from 'src/services/auth-admin.service.js';
 import { AuthService } from 'src/services/auth.service.js';
 import { CliService } from 'src/services/cli.service.js';
 import { ClusterGroupService } from 'src/services/cluster-group.service.js';
+import { DanbooruService } from 'src/services/danbooru.service.js';
 import { DatabaseBackupService } from 'src/services/database-backup.service.js';
 import { DatabaseService } from 'src/services/database.service.js';
 import { DownloadService } from 'src/services/download.service.js';
@@ -65,6 +66,7 @@ export const services = [
   AuthService,
   AuthAdminService,
   CliService,
+  DanbooruService, // custom
   DatabaseBackupService,
   DatabaseService,
   DownloadService,

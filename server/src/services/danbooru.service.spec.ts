@@ -1,0 +1,245 @@
+// custom: Danbooru tagging (pixai-tagger-v1.0 + CCIP faces)
+import { SourceType } from 'src/enum.js';
+import {
+  DANBOORU_MARKER_KEY,
+  DanbooruService,
+  TaggerResult,
+  cleanTagName,
+  distanceToReferences,
+  personName,
+} from 'src/services/danbooru.service.js';
+import { ServiceMocks, newTestService } from 'test/utils.js';
+
+vi.mock('node:fs/promises', () => ({
+  mkdir: vi.fn().mockResolvedValue(undefined),
+  readdir: vi.fn().mockResolvedValue([]),
+  readFile: vi.fn(),
+  rm: vi.fn().mockResolvedValue(undefined),
+  writeFile: vi.fn().mockResolvedValue(undefined),
+}));
+
+const ownerId = 'owner-1';
+
+// unit vectors along one axis (+ a small tilt), so cosine distances are easy to reason about
+const axis = (index: number, tilt = 0) => {
+  const values = Array.from({ length: 8 }, () => 0);
+  values[index] = 1;
+  values[(index + 1) % 8] = tilt;
+  return values;
+};
+const vec = (values: number[]) => {
+  const norm = Math.hypot(...values);
+  return Float32Array.from(values, (value) => value / norm);
+};
+
+const head = (index: number, box = [10, 10, 50, 50]) => ({ box: box as never, score: 0.9, ccip: axis(index) });
+
+const result = (overrides: Partial<TaggerResult> = {}): TaggerResult => ({
+  model: 'pixai-tagger-v1.0',
+  width: 1000,
+  height: 800,
+  tags: { general: { '1girl': 0.99, 'fate/stay_night_logo': 0.5 }, character: {}, copyright: {}, rating: {} },
+  heads: [],
+  ...overrides,
+});
+
+describe(DanbooruService.name, () => {
+  let sut: DanbooruService;
+  let mocks: ServiceMocks;
+  let people: Map<string, string>;
+
+  beforeEach(() => {
+    ({ sut, mocks } = newTestService(DanbooruService));
+    people = new Map([
+      ['megumin', 'p-megumin'],
+      ['yunyun', 'p-yunyun'],
+    ]);
+    mocks.person.getDistinctNames.mockImplementation(() =>
+      Promise.resolve([...people].map(([name, personGroupId]) => ({ name, personGroupId }))),
+    );
+    mocks.person.getByGroupId.mockImplementation(({ personGroupId }) => {
+      const name = [...people].find(([, id]) => id === personGroupId)?.[0];
+      return Promise.resolve(name ? ({ personGroupId, name, faceAssetId: 'face' } as never) : undefined);
+    });
+    let groups = 0;
+    mocks.person.createGroup.mockImplementation(() => Promise.resolve({ id: `p-new-${++groups}` } as never));
+    mocks.person.create.mockResolvedValue({} as never);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  describe('helpers', () => {
+    it('averages the three closest references', () => {
+      const refs = [vec(axis(0)), vec(axis(0, 0.1)), vec(axis(1)), vec(axis(2))];
+      const distance = distanceToReferences(vec(axis(0)), refs);
+      // two near-identical references and one orthogonal (distance 1)
+      expect(distance).toBeGreaterThan(0.33);
+      expect(distance).toBeLessThan(0.34);
+    });
+
+    it('keeps tag names flat and turns characters into readable names', () => {
+      expect(cleanTagName('excalibur_(fate/stay_night)')).toBe('excalibur_(fate_stay_night)');
+      expect(personName('raiden_shogun')).toBe('raiden shogun');
+    });
+  });
+
+  describe('assignFaces', () => {
+    it('pairs a single head with a single character, even without references', async () => {
+      const faces = await sut.assignFaces(
+        ownerId,
+        result({ tags: { ...result().tags, character: { megumin: 0.9 } }, heads: [head(0)] }),
+        new Map(),
+      );
+      expect(faces).toEqual([
+        expect.objectContaining({ personGroupId: 'p-megumin', box: { x1: 10, y1: 10, x2: 50, y2: 50 } }),
+      ]);
+    });
+
+    it('gives a character without a head a whole-image face', async () => {
+      const faces = await sut.assignFaces(
+        ownerId,
+        result({ tags: { ...result().tags, character: { megumin: 0.9 } } }),
+        new Map(),
+      );
+      expect(faces).toEqual([{ personGroupId: 'p-megumin', box: { x1: 0, y1: 0, x2: 1000, y2: 800 } }]);
+    });
+
+    it('pairs two heads with two characters by their references', async () => {
+      const references = new Map([
+        ['p-megumin', [vec(axis(0)), vec(axis(0, 0.1))]],
+        ['p-yunyun', [vec(axis(3)), vec(axis(3, 0.1))]],
+      ]);
+      const faces = await sut.assignFaces(
+        ownerId,
+        result({
+          tags: { ...result().tags, character: { megumin: 0.9, yunyun: 0.8 } },
+          heads: [head(3, [0, 0, 10, 10]), head(0, [20, 20, 30, 30])],
+        }),
+        references,
+      );
+      expect(faces).toEqual([
+        expect.objectContaining({ personGroupId: 'p-yunyun', box: { x1: 0, y1: 0, x2: 10, y2: 10 } }),
+        expect.objectContaining({ personGroupId: 'p-megumin', box: { x1: 20, y1: 20, x2: 30, y2: 30 } }),
+      ]);
+    });
+
+    it('matches a head without a pixai character only when it is close to a known character', async () => {
+      const references = new Map([['p-megumin', [vec(axis(0)), vec(axis(0, 0.05))]]]);
+      const faces = await sut.assignFaces(ownerId, result({ heads: [head(0), head(5)] }), references);
+      expect(faces.map(({ personGroupId }) => personGroupId)).toEqual(['p-megumin', null]);
+    });
+
+    it('creates a person for a character seen for the first time', async () => {
+      const faces = await sut.assignFaces(
+        ownerId,
+        result({ tags: { ...result().tags, character: { 'hiyuki_(wuthering_waves)': 0.95 } } }),
+        new Map(),
+      );
+      expect(mocks.person.create).toHaveBeenCalledWith({
+        ownerId,
+        personGroupId: 'p-new-1',
+        name: 'hiyuki (wuthering waves)',
+      });
+      expect(faces[0].personGroupId).toBe('p-new-1');
+    });
+  });
+
+  describe('processAsset', () => {
+    const candidate = { id: 'asset-1', ownerId, previewPath: '/data/thumbs/preview.webp' };
+
+    beforeEach(() => {
+      mocks.storage.readFile.mockResolvedValue(Buffer.from('preview'));
+      let tagIds = 0;
+      mocks.tag.upsertValue.mockImplementation(({ value }) => Promise.resolve({ id: `t-${++tagIds}`, value } as never));
+      mocks.tag.replaceAssetTags.mockResolvedValue([] as never);
+      mocks.asset.getForUpdateTags.mockResolvedValue({ tags: [{ value: '1girl' }] } as never);
+      mocks.person.getFacePersons.mockResolvedValue([]);
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue(
+          Response.json(
+            result({
+              tags: {
+                general: { '1girl': 0.99 },
+                character: { megumin: 0.95 },
+                copyright: { 'kono_subarashii_sekai_ni_shukufuku_wo!': 0.9 },
+                rating: {},
+              },
+              heads: [{ box: [100, 50, 300, 250], score: 0.9, ccip: axis(0) }],
+            }),
+          ),
+        ),
+      );
+    });
+
+    it('replaces all tags and the old whole-image faces of an image tagged by the old worker', async () => {
+      mocks.asset.getMetadataByKey.mockResolvedValue(undefined as never);
+      mocks.person.getFaces.mockResolvedValue([
+        {
+          id: 'legacy',
+          personGroupId: 'p-megumin',
+          sourceType: SourceType.Manual,
+          imageWidth: 2000,
+          imageHeight: 1600,
+          boundingBoxX1: 1,
+          boundingBoxY1: 1,
+          boundingBoxX2: 2000,
+          boundingBoxY2: 1600,
+        },
+        {
+          id: 'human',
+          personGroupId: 'p-someone',
+          sourceType: SourceType.MachineLearning,
+          imageWidth: 2000,
+          imageHeight: 1600,
+          boundingBoxX1: 10,
+          boundingBoxY1: 10,
+          boundingBoxX2: 90,
+          boundingBoxY2: 90,
+        },
+      ] as never);
+
+      await sut.processAsset(candidate);
+
+      expect(mocks.tag.getAssetTagIds).not.toHaveBeenCalled();
+      expect(mocks.tag.replaceAssetTags).toHaveBeenCalledWith('asset-1', ['t-1', 't-2', 't-3']);
+      expect(mocks.tag.upsertValue).toHaveBeenCalledWith(
+        expect.objectContaining({ value: '::series:kono_subarashii_sekai_ni_shukufuku_wo!' }),
+      );
+      expect(mocks.asset.upsertExif).toHaveBeenCalledWith(
+        expect.objectContaining({ exif: expect.objectContaining({ assetId: 'asset-1', description: '1girl' }) }),
+      );
+      expect(mocks.person.deleteAssetFace).toHaveBeenCalledExactlyOnceWith('legacy');
+      expect(mocks.person.createAssetFace).toHaveBeenCalledWith(
+        expect.objectContaining({
+          assetId: 'asset-1',
+          personGroupId: 'p-megumin',
+          boundingBoxX1: 100,
+          boundingBoxY2: 250,
+          imageWidth: 1000,
+          sourceType: SourceType.Manual,
+        }),
+      );
+      expect(mocks.asset.upsertMetadata).toHaveBeenCalledWith('asset-1', [
+        {
+          key: DANBOORU_MARKER_KEY,
+          value: expect.objectContaining({ model: 'pixai-tagger-v1.0', tagIds: ['t-1', 't-2', 't-3'] }),
+        },
+      ]);
+    });
+
+    it('keeps tags added by hand when re-tagging an image it tagged before', async () => {
+      mocks.asset.getMetadataByKey.mockResolvedValue({
+        value: { model: 'old', at: '', tagIds: ['t-old'], faceIds: ['f-old'] },
+      } as never);
+      mocks.tag.getAssetTagIds.mockResolvedValue(['t-old', 't-mine']);
+      mocks.person.getFaces.mockResolvedValue([]);
+
+      await sut.processAsset(candidate);
+
+      expect(mocks.tag.replaceAssetTags).toHaveBeenCalledWith('asset-1', ['t-mine', 't-1', 't-2', 't-3']);
+    });
+  });
+});

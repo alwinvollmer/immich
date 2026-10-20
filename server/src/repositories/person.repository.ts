@@ -1006,4 +1006,20 @@ export class PersonRepository {
       .where('person.personGroupId', 'in', personGroupIds)
       .execute();
   }
+
+  // custom: the current person of CCIP-indexed faces (DanbooruService); faces that are deleted
+  // or sit on trashed assets are left out
+  getFacePersons(faceIds: string[]) {
+    if (faceIds.length === 0) {
+      return Promise.resolve([]);
+    }
+
+    return this.db
+      .selectFrom('asset_face')
+      .select(['asset_face.id', 'asset_face.personGroupId', 'asset_face.ownerId'])
+      .where('asset_face.id', '=', anyUuid(faceIds))
+      .where('asset_face.deletedAt', 'is', null)
+      .where('asset_face.assetDeletedAt', 'is', null)
+      .execute();
+  }
 }
