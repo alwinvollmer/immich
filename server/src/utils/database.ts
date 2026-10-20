@@ -304,6 +304,8 @@ export function inSharedAlbum(userId: string, assetId: 'asset.id' | 'asset_face.
   );
 }
 
+// custom: the flat `albumIds` search filter matches assets in ANY of the albums
+// (upstream: in ALL of them). The web search album checklist relies on this.
 export function inAlbums<O>(qb: SelectQueryBuilder<DB, 'asset', O>, albumIds: string[]) {
   return qb.innerJoin(
     (eb) =>
@@ -312,7 +314,6 @@ export function inAlbums<O>(qb: SelectQueryBuilder<DB, 'asset', O>, albumIds: st
         .select('assetId')
         .where('albumId', '=', anyUuid(albumIds!))
         .groupBy('assetId')
-        .having((eb) => eb.fn.count('albumId').distinct(), '=', albumIds.length)
         .as('has_album'),
     (join) => join.onRef('has_album.assetId', '=', 'asset.id'),
   );
