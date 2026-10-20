@@ -103,8 +103,14 @@ export class UpscaleService extends BaseService {
   ) {
     let upscalerJobId: string | undefined;
     try {
+      // re-read: the storage template may have moved the file since the job was created
+      const current = await this.assetRepository.getById(asset.id);
       const form = new FormData();
-      form.append('image', new Blob([await readFile(asset.originalPath)]), `image${extension}`);
+      form.append(
+        'image',
+        new Blob([await readFile(current?.originalPath ?? asset.originalPath)]),
+        `image${extension}`,
+      );
       form.append('outscale', String(job.scale));
       const created = (await this.upscaler('POST', '/jobs', form)) as { id: string };
       upscalerJobId = created.id;
@@ -148,11 +154,11 @@ export class UpscaleService extends BaseService {
       job.newAssetId = await this.save(auth, asset, extension, result);
       Object.assign(job, { state: UpscaleJobState.Done });
     } catch (error) {
-      this.logger.error(`Upscale of ${asset.id} failed: ${error}`);
-      Object.assign(job, {
-        state: UpscaleJobState.Error,
-        error: error instanceof Error ? error.message : String(error),
-      });
+      // fetch() hides the network error in `cause` ("fetch failed")
+      const cause = error instanceof Error && error.cause ? `: ${String(error.cause)}` : '';
+      const message = `${error instanceof Error ? error.message : String(error)}${cause}`;
+      this.logger.error(`Upscale of ${asset.id} failed: ${message}`);
+      Object.assign(job, { state: UpscaleJobState.Error, error: message });
       if (upscalerJobId) {
         await this.upscaler('DELETE', `/jobs/${upscalerJobId}`).catch(() => {});
       }
