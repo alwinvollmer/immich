@@ -42,6 +42,10 @@ Web (`cd web`): `pnpm run check:svelte`; `pnpm run check:typescript`;
 `npx eslint --max-warnings 0 --rule 'tscompat/tscompat: off' <files>`; `npx prettier --check <files>`
 (`--write` / `eslint --fix` for Tailwind class order); `npx vitest run`.
 
+⚠️ `eslint --fix` silently rewrites `http://` URLs to `https://` (rule `unicorn/prefer-https`),
+in code AND tests alike, so the tests still pass. Plain-HTTP LAN services (the upscaler) need an
+`// eslint-disable-next-line unicorn/prefer-https`. After any `--fix`, check `git diff` for changed URLs.
+
 Known local-only failures (also on pristine upstream, ignore):
 - eslint `tscompat/tscompat` crashes ("Cannot read properties of undefined (reading 'Class')")
   → lint with the rule off, and avoid new JS APIs by hand (no `Array.toSorted`, etc.).

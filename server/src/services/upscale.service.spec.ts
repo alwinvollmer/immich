@@ -99,13 +99,16 @@ describe(UpscaleService.name, () => {
       authStub.admin.user.id,
       expect.objectContaining({ state: UpscaleJobState.Running, tilesDone: 1, tilesTotal: 2 }),
     );
+    // the upscaler is plain HTTP: keep `eslint --fix` (unicorn/prefer-https) away from these
+    /* eslint-disable unicorn/prefer-https */
     expect(fetchMock.mock.calls.map(([url, init]) => `${init?.method} ${url}`)).toEqual([
-      'POST https://host.docker.internal:7085/jobs',
-      'GET https://host.docker.internal:7085/jobs/u1',
-      'GET https://host.docker.internal:7085/jobs/u1',
-      'GET https://host.docker.internal:7085/jobs/u1/result',
-      'DELETE https://host.docker.internal:7085/jobs/u1',
+      'POST http://host.docker.internal:7085/jobs',
+      'GET http://host.docker.internal:7085/jobs/u1',
+      'GET http://host.docker.internal:7085/jobs/u1',
+      'GET http://host.docker.internal:7085/jobs/u1/result',
+      'DELETE http://host.docker.internal:7085/jobs/u1',
     ]);
+    /* eslint-enable unicorn/prefer-https */
     expect(mocks.tag.upsertAssetIds).toHaveBeenCalledWith([{ tagId: 'tag-1', assetId: newAssetId }]);
     expect(mocks.asset.upsertExif).toHaveBeenCalled();
     expect(mocks.stack.create).toHaveBeenCalledWith({ ownerId: authStub.admin.user.id }, [newAssetId, assetId]);

@@ -25,7 +25,10 @@ import { updateLockedColumns } from 'src/utils/database.js';
  * Jobs live in memory: a server restart forgets running jobs (the upscaler drops
  * unfetched results after an hour).
  */
-const UPSCALER_URL = (process.env.IMMICH_UPSCALER_URL || 'https://host.docker.internal:7085').replace(/\/+$/, '');
+// The upscaler is a plain-HTTP service on the Docker host. NOTE: `eslint --fix`
+// (unicorn/prefer-https) silently turns this into https, which breaks it.
+// eslint-disable-next-line unicorn/prefer-https
+const UPSCALER_URL = (process.env.IMMICH_UPSCALER_URL || 'http://host.docker.internal:7085').replace(/\/+$/, '');
 const SUPPORTED_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp']);
 const POLL_INTERVAL_MS = 1500;
 const FINISHED_JOB_TTL_MS = 10 * 60 * 1000;
