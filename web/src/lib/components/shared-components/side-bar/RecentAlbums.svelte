@@ -12,7 +12,8 @@
   const refreshAlbums = async () => {
     try {
       const allAlbums = await getAllAlbums({});
-      albums = allAlbums.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()).slice(0, 3);
+      // custom: 5 recent albums in the sidebar (upstream: 3)
+      albums = allAlbums.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()).slice(0, 5);
       userInteraction.recentAlbums = albums;
     } catch (error) {
       handleError(error, $t('failed_to_load_assets'));
