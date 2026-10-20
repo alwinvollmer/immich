@@ -38,7 +38,7 @@ Done (2026-10-20): own image + pipeline; Photos album filter (default Camera);
 drop files on an album (sidebar / Photos chip) to upload into it; Ctrl+V asks for
 an optional album; 5 albums in the sidebar; archiving workaround removed.
 
-1. **Server-side stack rule** — stack originals can never be added to albums
+1. ~~**Server-side stack rule**~~ DONE 2026-10-20 (c391e4e + 4e0b2cb; worker stack-tidy off, stack-copy unused, 92 originals restored into their stacks, copies trashed) — stack originals can never be added to albums
    (album add-assets skips non-primary stack members), stack bar regardless of
    member visibility, stacks on the Archive page. Then drop the worker's
    stack-tidy and the stack-copy/trash design.
