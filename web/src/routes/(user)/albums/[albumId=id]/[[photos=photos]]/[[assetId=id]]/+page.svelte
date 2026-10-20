@@ -233,9 +233,11 @@
         visibility: AssetVisibility.Timeline,
         withPartners: true,
         timelineAlbumId: albumId,
+        withStacked: true, // custom: pick from stack covers
       };
     }
-    return { albumId, order: album.order };
+    // custom: withStacked so album tiles get the stack badge (only covers are in albums)
+    return { albumId, order: album.order, withStacked: true };
   });
 
   const isShared = $derived(viewMode === AlbumPageViewMode.SELECT_ASSETS ? false : album.albumUsers.length > 1);
