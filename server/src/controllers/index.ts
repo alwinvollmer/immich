@@ -39,6 +39,7 @@ import { SystemMetadataController } from 'src/controllers/system-metadata.contro
 import { TagController } from 'src/controllers/tag.controller.js';
 import { TimelineController } from 'src/controllers/timeline.controller.js';
 import { TrashController } from 'src/controllers/trash.controller.js';
+import { UpscaleController } from 'src/controllers/upscale.controller.js';
 import { UserAdminController } from 'src/controllers/user-admin.controller.js';
 import { UserController } from 'src/controllers/user.controller.js';
 import { VideoStreamController } from 'src/controllers/video-stream.controller.js';
@@ -81,6 +82,7 @@ export const controllers = [
   SessionController,
   SharedLinkController,
   StackController,
+  UpscaleController, // custom
   SyncController,
   SystemConfigController,
   SystemMetadataController,

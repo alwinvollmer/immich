@@ -16737,6 +16737,101 @@
         "x-immich-state": "Stable"
       }
     },
+    "/upscale": {
+      "post": {
+        "description": "Fork addition: upscale an image with the anime upscaler. The result becomes the cover of a stack with the original. Progress is sent as on_upscale_update websocket events.",
+        "operationId": "createUpscale",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpscaleCreateDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpscaleJobResponseDto"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "cookie": []
+          },
+          {
+            "api_key": []
+          }
+        ],
+        "summary": "Upscale an image",
+        "tags": [
+          "Assets"
+        ],
+        "x-immich-history": [
+          {
+            "version": "v3",
+            "state": "Added"
+          }
+        ],
+        "x-immich-permission": "asset.update"
+      }
+    },
+    "/upscale/jobs": {
+      "get": {
+        "description": "Fork addition: the current user's running and recently finished upscale jobs.",
+        "operationId": "getUpscaleJobs",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/UpscaleJobResponseDto"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "cookie": []
+          },
+          {
+            "api_key": []
+          }
+        ],
+        "summary": "List upscale jobs",
+        "tags": [
+          "Assets"
+        ],
+        "x-immich-history": [
+          {
+            "version": "v3",
+            "state": "Added"
+          }
+        ],
+        "x-immich-permission": "asset.read"
+      }
+    },
     "/users": {
       "get": {
         "description": "Retrieve a list of all users on the server.",
@@ -32757,6 +32852,111 @@
           }
         },
         "type": "object"
+      },
+      "UpscaleCreateDto": {
+        "properties": {
+          "assetId": {
+            "description": "Image to upscale",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$",
+            "type": "string"
+          },
+          "scale": {
+            "description": "Upscale factor (2 or 4)",
+            "maximum": 9007199254740991,
+            "minimum": -9007199254740991,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "assetId",
+          "scale"
+        ],
+        "type": "object"
+      },
+      "UpscaleJobResponseDto": {
+        "properties": {
+          "assetId": {
+            "description": "Image being upscaled",
+            "type": "string"
+          },
+          "error": {
+            "description": "Error message if the job failed",
+            "nullable": true,
+            "type": "string"
+          },
+          "filename": {
+            "description": "Original file name",
+            "type": "string"
+          },
+          "id": {
+            "description": "Upscale job ID",
+            "type": "string"
+          },
+          "newAssetId": {
+            "description": "The upscaled image, once done",
+            "nullable": true,
+            "type": "string"
+          },
+          "position": {
+            "description": "Position in the upscaler queue while queued",
+            "maximum": 9007199254740991,
+            "minimum": -9007199254740991,
+            "nullable": true,
+            "type": "integer"
+          },
+          "progress": {
+            "description": "Progress from 0 to 1",
+            "format": "double",
+            "type": "number"
+          },
+          "scale": {
+            "description": "Upscale factor",
+            "maximum": 9007199254740991,
+            "minimum": -9007199254740991,
+            "type": "integer"
+          },
+          "state": {
+            "$ref": "#/components/schemas/UpscaleJobState"
+          },
+          "tilesDone": {
+            "description": "Finished tiles",
+            "maximum": 9007199254740991,
+            "minimum": -9007199254740991,
+            "type": "integer"
+          },
+          "tilesTotal": {
+            "description": "Total tiles (0 until known)",
+            "maximum": 9007199254740991,
+            "minimum": -9007199254740991,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "assetId",
+          "error",
+          "filename",
+          "id",
+          "newAssetId",
+          "position",
+          "progress",
+          "scale",
+          "state",
+          "tilesDone",
+          "tilesTotal"
+        ],
+        "type": "object"
+      },
+      "UpscaleJobState": {
+        "description": "Upscale job state",
+        "enum": [
+          "queued",
+          "running",
+          "saving",
+          "done",
+          "error"
+        ],
+        "type": "string"
       },
       "UsageByUserDto": {
         "properties": {

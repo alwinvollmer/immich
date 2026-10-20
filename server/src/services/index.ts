@@ -46,6 +46,7 @@ import { TelemetryService } from 'src/services/telemetry.service.js';
 import { TimelineService } from 'src/services/timeline.service.js';
 import { TranscodingService } from 'src/services/transcoding.service.js';
 import { TrashService } from 'src/services/trash.service.js';
+import { UpscaleService } from 'src/services/upscale.service.js';
 import { UserAdminService } from 'src/services/user-admin.service.js';
 import { UserService } from 'src/services/user.service.js';
 import { VersionService } from 'src/services/version.service.js';
@@ -92,6 +93,7 @@ export const services = [
   SmartInfoService,
   StackService,
   StackAlbumService, // custom
+  UpscaleService, // custom
   StorageService,
   StorageTemplateService,
   SyncService,

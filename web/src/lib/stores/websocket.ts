@@ -7,6 +7,7 @@ import {
   type ServerVersionResponseDto,
   type SyncAssetEditV1,
   type SyncAssetV2,
+  type UpscaleJobResponseDto,
 } from '@immich/sdk';
 import { io, type Socket } from 'socket.io-client';
 import { get, writable } from 'svelte/store';
@@ -37,6 +38,7 @@ export interface Events {
   on_new_release: (event: ReleaseEventV1) => void;
   on_session_delete: (sessionId: string) => void;
   on_notification: (notification: NotificationDto) => void;
+  on_upscale_update: (job: UpscaleJobResponseDto) => void; // custom: upscale job progress
 
   AppRestartV1: (event: AppRestartEvent) => void;
 

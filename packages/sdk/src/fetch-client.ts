@@ -3183,6 +3183,35 @@ export type TrashResponseDto = {
     /** Number of items in trash */
     count: number;
 };
+export type UpscaleCreateDto = {
+    /** Image to upscale */
+    assetId: string;
+    /** Upscale factor (2 or 4) */
+    scale: number;
+};
+export type UpscaleJobResponseDto = {
+    /** Image being upscaled */
+    assetId: string;
+    /** Error message if the job failed */
+    error: string | null;
+    /** Original file name */
+    filename: string;
+    /** Upscale job ID */
+    id: string;
+    /** The upscaled image, once done */
+    newAssetId: string | null;
+    /** Position in the upscaler queue while queued */
+    position: number | null;
+    /** Progress from 0 to 1 */
+    progress: number;
+    /** Upscale factor */
+    scale: number;
+    state: UpscaleJobState;
+    /** Finished tiles */
+    tilesDone: number;
+    /** Total tiles (0 until known) */
+    tilesTotal: number;
+};
 export type UserUpdateMeDto = {
     avatarColor?: (UserAvatarColor) | null;
     /** User email */
@@ -7605,6 +7634,32 @@ export function restoreAssets({ bulkIdsDto }: {
     })));
 }
 /**
+ * Upscale an image
+ */
+export function createUpscale({ upscaleCreateDto }: {
+    upscaleCreateDto: UpscaleCreateDto;
+}, opts?: Oazapfts.RequestOpts) {
+    return oazapfts.ok(oazapfts.fetchJson<{
+        status: 201;
+        data: UpscaleJobResponseDto;
+    }>("/upscale", oazapfts.json({
+        ...opts,
+        method: "POST",
+        body: upscaleCreateDto
+    })));
+}
+/**
+ * List upscale jobs
+ */
+export function getUpscaleJobs(opts?: Oazapfts.RequestOpts) {
+    return oazapfts.ok(oazapfts.fetchJson<{
+        status: 200;
+        data: UpscaleJobResponseDto[];
+    }>("/upscale/jobs", {
+        ...opts
+    }));
+}
+/**
  * Get all users
  */
 export function searchUsers(opts?: Oazapfts.RequestOpts) {
@@ -8618,6 +8673,13 @@ export enum SyncRequestType {
 export enum AssetOrderBy {
     TakenAt = "takenAt",
     CreatedAt = "createdAt"
+}
+export enum UpscaleJobState {
+    Queued = "queued",
+    Running = "running",
+    Saving = "saving",
+    Done = "done",
+    Error = "error"
 }
 export enum WorkflowResult {
     Completed = "completed",

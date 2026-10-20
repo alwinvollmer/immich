@@ -12,6 +12,7 @@ import { AuthDto } from 'src/dtos/auth.dto.js';
 import { NotificationDto } from 'src/dtos/notification.dto.js';
 import { ReleaseEventV1, ServerVersionResponseDto } from 'src/dtos/server.dto.js';
 import { SyncAssetEditV1, SyncAssetExifV1, SyncAssetV2 } from 'src/dtos/sync.dto.js';
+import { UpscaleJobResponseDto } from 'src/dtos/upscale.dto.js'; // custom: on_upscale_update
 import { type AppRestartEvent, type ArgsOf, EventRepository } from 'src/repositories/event.repository.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
 import { handlePromiseError } from 'src/utils/misc.js';
@@ -37,6 +38,7 @@ export interface ClientEventMap {
   on_asset_hidden: [string];
   on_asset_restore: [string[]];
   on_asset_stack_update: string[];
+  on_upscale_update: [UpscaleJobResponseDto]; // custom: upscale job progress
   on_album_update: [string];
   on_person_thumbnail: [string];
   on_server_version: [ServerVersionResponseDto];

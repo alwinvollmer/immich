@@ -10,6 +10,7 @@
   import { assetViewerManager } from '$lib/managers/asset-viewer-manager.svelte';
   import { authManager } from '$lib/managers/auth-manager.svelte';
   import { languageManager } from '$lib/managers/language-manager.svelte';
+  import { upscaleManager } from '$lib/managers/upscale-manager.svelte'; // custom
   import { getAlbumAssetActions } from '$lib/services/album.service';
   import { getGlobalActions } from '$lib/services/app.service';
   import { getAssetActions } from '$lib/services/asset.service';
@@ -27,7 +28,7 @@
     type StackResponseDto,
   } from '@immich/sdk';
   import { ActionButton, CommandPaletteDefaultProvider, Tooltip, type ActionItem } from '@immich/ui';
-  import { mdiArrowLeft, mdiArrowRight, mdiDotsVertical, mdiVideoOutline } from '@mdi/js';
+  import { mdiArrowExpandAll, mdiArrowLeft, mdiArrowRight, mdiDotsVertical, mdiVideoOutline } from '@mdi/js';
   import { t } from 'svelte-i18n';
 
   interface Props {
@@ -74,6 +75,21 @@
     icon: mdiVideoOutline,
     $if: () => asset.type === AssetTypeEnum.Video,
     onAction: () => setPlayOriginalVideo(!isPlayingOriginalVideo),
+  });
+
+  // custom: upscale via the server's anime-upscaler job (progress in the upscale panel)
+  const canUpscale = () => isOwner && !isLocked && !asset.isTrashed && asset.type === AssetTypeEnum.Image;
+  const UpscaleX2: ActionItem = $derived({
+    title: 'Upscale ×2',
+    icon: mdiArrowExpandAll,
+    $if: canUpscale,
+    onAction: () => void upscaleManager.start(asset.id, 2),
+  });
+  const UpscaleX4: ActionItem = $derived({
+    title: 'Upscale ×4',
+    icon: mdiArrowExpandAll,
+    $if: canUpscale,
+    onAction: () => void upscaleManager.start(asset.id, 4),
   });
 
   const Actions = $derived(getAssetActions($t, { ...asset, stackPrimaryAssetId: stack?.primaryAssetId }, album));
@@ -166,6 +182,8 @@
 
         {#if isOwner}
           <hr />
+          <ActionMenuItem action={UpscaleX2} />
+          <ActionMenuItem action={UpscaleX4} />
           <ActionMenuItem action={Actions.RefreshFacesJob} />
           <ActionMenuItem action={Actions.RefreshMetadataJob} />
           <ActionMenuItem action={Actions.RegenerateThumbnailJob} />
