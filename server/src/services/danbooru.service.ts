@@ -122,10 +122,7 @@ export class DanbooruService extends BaseService {
       return;
     }
     await this.loadIndex();
-    this.logger.log(
-      `Danbooru tagging on: ${TAGGER_URL}, albums [${ALBUM_NAMES.join(', ')}]` +
-        `${INCLUDE_UNSORTED ? ' + images in no album' : ''}, ${this.index.size} indexed faces`,
-    );
+    this.logger.log(`Danbooru tagging on: ${TAGGER_URL}, ${this.scope()}, ${this.index.size} indexed faces`);
     this.running = this.loop();
   }
 
@@ -133,6 +130,13 @@ export class DanbooruService extends BaseService {
   async onShutdown() {
     this.stopped = true;
     await this.running;
+  }
+
+  private scope() {
+    if (ALBUM_NAMES.length === 0) {
+      return 'all images';
+    }
+    return `albums [${ALBUM_NAMES.join(', ')}]${INCLUDE_UNSORTED ? ' + images in no album' : ''}`;
   }
 
   private get indexFolder() {

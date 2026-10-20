@@ -83,16 +83,23 @@ merging a new upstream release. Back to stock = point `IMMICH_SERVER_IMAGE` at
 
 ## External pieces (still outside the fork)
 
-- `C:\docker\immich-api-worker` (Python, port 7086): ONLY Danbooru tagging now (workflow
-  "Danbooru auto-tag" → webhook). Upscale, stack-tidy, desktop-tidy are OFF; stack_copy.py unused.
-  Rebuild: `docker compose build --no-cache --pull=false && docker compose up -d --force-recreate`.
-- danbooru-tagger (:7860, with proxy) and anime-upscaler (:7085, CPU mode) stay separate services.
+- booru-tagger (`C:\docker\booru-tagger`, :7860, CPU): sources in `custom/booru-tagger/` — copy
+  them to `C:\docker\booru-tagger\tagger` and `docker compose build` there. `/v2/analyze`
+  (pixai-tagger-v1.0 + head detection + CCIP), `/v2/cluster`, `/v2/info`; legacy `/tag` (v0.9) only
+  for the old worker (`ENABLE_V1=0` turns it off). For big remaps run the GPU variant
+  (`Dockerfile.gpu`, `--gpus all`, same model file → same tags) on another port and point
+  `IMMICH_TAGGER_URL` at it; daily use stays on CPU (~16 s/image, ~4.6 GB RAM) to keep VRAM free.
+  ⚠️ Docker Desktop's build proxy on nieke returns 502 for Fastly hosts (PyPI, deb.debian.org):
+  build with `--build-arg HTTP_PROXY= --build-arg HTTPS_PROXY= --build-arg http_proxy= --build-arg https_proxy=`.
+  deb.debian.org is unreachable from containers at all → images are Ubuntu-based.
+- `C:\docker\immich-api-worker` (port 7086): RETIRED 2026-10-21 (container stopped, workflow
+  "Danbooru auto-tag (webhook)" disabled; backup C:\temp\claude-immich\workflow-danbooru-autotag-2026-10-21.json).
+- anime-upscaler (:7085, CPU mode) stays separate.
   anime-upscaler (`C:\docker\anime-upscaler\main.py`, bind-mounted → `docker compose restart`) has a
   job API: `POST /jobs` (image, outscale) → id; `GET /jobs/{id}` (state, progress, tilesDone/Total,
   position); `GET /jobs/{id}/result`; `DELETE /jobs/{id}` (a running job stops before its next tile).
   Used by UpscaleService (`IMMICH_UPSCALER_URL`, default `http://host.docker.internal:7085`) and the
   desktop's `~/.local/bin/wallpaper-upscale`.
-- Roadmap items 2–4 move the worker's glue into the server (see `CUSTOM.md`).
 
 ## Behaviour the fork relies on (don't break)
 
@@ -104,6 +111,14 @@ merging a new upstream release. Back to stock = point `IMMICH_SERVER_IMAGE` at
 - Uploads into albums: drop files on a sidebar album or a Photos album chip (`use:albumDropTarget`;
   the global drop overlay is a click-through hint), or Ctrl+V → `PasteUploadModal` (optional album).
   Nothing is filed into Desktop automatically any more. Sidebar shows 5 recent albums.
+- Danbooru tagging (`DanbooruService`, env `IMMICH_DANBOORU_*` / `IMMICH_TAGGER_URL` in `C:\docker\immich\.env`):
+  loop in the microservices worker over images without a `custom.danbooru` marker for the tagger's
+  current model (newest first). Tags + description + `::series:` + `danbooru`; characters → People
+  with head boxes (CCIP vectors in `/data/custom/ccip/<assetId>.json`, NOT asset_metadata — that
+  syncs to the phone). A marker-less image loses all its tags first; later runs only replace the
+  tags in the marker. Maintenance pass when idle (≤ every 12 h): pair/match unassigned heads,
+  OPTICS-cluster the rest into unnamed people. Character names = Danbooru tags with `_` → space.
+- Immich face detection only on camera photos (`IMMICH_FACES_CAMERA_ONLY=1`: EXIF make required).
 - Upscale: viewer ⋮ "Upscale ×2/×4" → `UpscaleService` (in-memory jobs, `on_upscale_update`
   websocket events) → `UpscalePanel`; result = new stack cover with the original's metadata/tags.
 - Mobile app: background backup never assigns folder albums (only foreground sync does);

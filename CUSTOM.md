@@ -46,14 +46,18 @@ an optional album; 5 albums in the sidebar; archiving workaround removed.
    `--waifu-upscale-x2/x4` tag + workflow + worker; progress shown like the upload
    panel (reuse it as a job progress indicator). The server calls the
    anime-upscaler itself as a job.
-3. **Faces + Danbooru characters (discuss first)** — Immich face recognition is
-   effectively off (`minFaces: 200000`, which also makes the nightly facial
-   recognition job crash: "Invalid value for 'numResults': 200000") so it does
-   not overwrite the characters the danbooru-tagger writes as People. Goal: both
-   working together, and recognising new characters Immich does not know yet.
-4. **Absorb the remaining worker glue** — Danbooru tagging as a server job instead
-   of workflow-webhook → worker; then the immich-api-worker can go
-   (desktop_tidy.py is already dead code).
+3. ~~**Faces + Danbooru characters**~~ + 4. ~~**Danbooru tagging in the server**~~ DONE 2026-10-21
+   (fe3b12c, c8e4677): `DanbooruService` tags with pixai-tagger-v1.0 (cutoff May 2026, 8,308
+   characters; v0.9 stopped mid-2024) through the booru-tagger v2 service (`custom/booru-tagger`),
+   with real head boxes and CCIP character embeddings (fallback matching for characters pixai
+   misses, OPTICS clustering of unknown heads into unnamed people, a maintenance pass that pairs
+   heads of multi-character images later). A marker per image (`custom.danbooru` in asset_metadata)
+   names the model, so a new model remaps the library by itself. Immich's own face detection runs
+   only on camera photos (`IMMICH_FACES_CAMERA_ONLY=1`, EXIF make). 19 People renamed to the new
+   Danbooru names. Forced remap of all 11,376 images on the GPU tagger. The immich-api-worker and
+   its "Danbooru auto-tag" workflow are off (stopped/disabled; delete after the remap).
+   Open: decide about People with one image; ML junk-face cleanup (3,359 faces on images without
+   EXIF make, list in C:\temp\claude-immich\junk-ml-faces-2026-10-21.csv) then `minFaces` back to 3.
 5. **Mobile app (later)** — own APK via Obtainium: point /api/server/apk-links
    (server.service.ts) at this fork's releases.
 
