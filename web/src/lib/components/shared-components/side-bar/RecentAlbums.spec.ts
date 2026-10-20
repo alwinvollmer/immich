@@ -11,6 +11,8 @@ describe('RecentAlbums component', () => {
       albumFactory.build({ updatedAt: '2024-01-09T00:00:01Z' }),
       albumFactory.build({ updatedAt: '2024-01-10T00:00:00Z' }),
       albumFactory.build({ updatedAt: '2024-01-09T00:00:00Z' }),
+      albumFactory.build({ updatedAt: '2024-01-05T00:00:00Z' }),
+      albumFactory.build({ updatedAt: '2024-01-02T00:00:00Z' }),
     ];
 
     sdkMock.getAllAlbums.mockResolvedValueOnce([...albums]);
@@ -23,9 +25,12 @@ describe('RecentAlbums component', () => {
     await tick();
 
     const links = screen.getAllByRole('link');
-    expect(links).toHaveLength(3);
+    // custom: the fork shows 5 recent albums (upstream: 3); the oldest one is cut off
+    expect(links).toHaveLength(5);
     expect(links[0]).toHaveAttribute('href', `/albums/${albums[2].id}`);
     expect(links[1]).toHaveAttribute('href', `/albums/${albums[1].id}`);
     expect(links[2]).toHaveAttribute('href', `/albums/${albums[3].id}`);
+    expect(links[3]).toHaveAttribute('href', `/albums/${albums[4].id}`);
+    expect(links[4]).toHaveAttribute('href', `/albums/${albums[5].id}`);
   });
 });
