@@ -7,7 +7,8 @@
   import { getFilesFromDataTransfer, hasFiles } from '$lib/utils/file-drop';
   import { fileUploadHandler } from '$lib/utils/file-uploader';
   import { isAlbumsRoute, isLockedFolderRoute } from '$lib/utils/navigation';
-  import { Logo } from '@immich/ui';
+  import PasteUploadModal from '$lib/modals/PasteUploadModal.svelte';
+  import { Logo, modalManager } from '@immich/ui';
   import { t } from 'svelte-i18n';
   import { fade } from 'svelte/transition';
 
@@ -25,7 +26,16 @@
       return;
     }
 
-    await handleFiles(await getFilesFromDataTransfer(event.clipboardData));
+    const files = await getFilesFromDataTransfer(event.clipboardData);
+    if (files.length === 0 || authManager.isSharedLink || isInLockedFolder) {
+      return handleFiles(files);
+    }
+
+    // custom: ask which album (optional) before uploading pasted files
+    const result = await modalManager.show(PasteUploadModal, { files, defaultAlbumId: albumId });
+    if (result) {
+      await fileUploadHandler({ files, albumId: result.albumId });
+    }
   };
 
   const handleFiles = async (files: File[]) => {
