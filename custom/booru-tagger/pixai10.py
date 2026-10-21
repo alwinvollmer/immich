@@ -28,7 +28,15 @@ CATEGORIES = ("general", "character", "copyright", "rating")
 
 def providers():
     if os.environ.get("TAGGER_DEVICE", "cpu").lower() == "gpu":
-        return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        # Without limits the CUDA arena grows until the 6 GB card is full; Windows then spills
+        # into shared system memory and every image takes ~12 s instead of ~1.5 s (2026-10-21).
+        limit_mb = int(os.environ.get("PIXAI_GPU_MEM_MB", "3500"))
+        options = {
+            "arena_extend_strategy": "kSameAsRequested",
+            "gpu_mem_limit": limit_mb * 1024 * 1024,
+            "cudnn_conv_algo_search": "HEURISTIC",
+        }
+        return [("CUDAExecutionProvider", options), "CPUExecutionProvider"]
     return ["CPUExecutionProvider"]
 
 
