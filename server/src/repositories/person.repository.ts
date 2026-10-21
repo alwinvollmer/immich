@@ -1016,7 +1016,12 @@ export class PersonRepository {
 
     return this.db
       .selectFrom('asset_face')
-      .select(['asset_face.id', 'asset_face.personGroupId', 'asset_face.ownerId'])
+      .leftJoin('person', (join) =>
+        join
+          .onRef('person.personGroupId', '=', 'asset_face.personGroupId')
+          .onRef('person.ownerId', '=', 'asset_face.ownerId'),
+      )
+      .select(['asset_face.id', 'asset_face.personGroupId', 'asset_face.ownerId', 'person.name'])
       .where('asset_face.id', '=', anyUuid(faceIds))
       .where('asset_face.deletedAt', 'is', null)
       .where('asset_face.assetDeletedAt', 'is', null)
@@ -1033,10 +1038,10 @@ export class PersonRepository {
           .on('asset_face.deletedAt', 'is', null)
           .on('asset_face.assetDeletedAt', 'is', null),
       )
-      .select(['person.personGroupId', 'person.ownerId', 'person.isHidden'])
+      .select(['person.personGroupId', 'person.ownerId', 'person.isHidden', 'person.name'])
       .select((eb) => eb.fn.count<string>('asset_face.assetId').distinct().as('assets'))
       .$if(!!personGroupIds, (qb) => qb.where('person.personGroupId', '=', anyUuid(personGroupIds!)))
-      .groupBy(['person.personGroupId', 'person.ownerId', 'person.isHidden'])
+      .groupBy(['person.personGroupId', 'person.ownerId', 'person.isHidden', 'person.name'])
       .execute();
     return rows.map((row) => ({ ...row, assets: Number(row.assets) }));
   }

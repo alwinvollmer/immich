@@ -6,6 +6,7 @@
   import { faceManager } from '$lib/stores/face.svelte';
   import { locale } from '$lib/stores/preferences.store';
   import { getPeopleThumbnailUrl } from '$lib/utils';
+  import { faceSourceLabel, loadFaceRecords, type FaceRecord } from '$lib/utils/danbooru-face-source'; // custom
   import { type AssetResponseDto } from '@immich/sdk';
   import { IconButton, Text } from '@immich/ui';
   import { mdiEye, mdiEyeOff, mdiPencil, mdiPlus } from '@mdi/js';
@@ -21,6 +22,21 @@
   const { asset, isOwner, previousRoute }: Props = $props();
 
   const people = $derived(Array.from(faceManager.people));
+
+  // custom: where each person came from (pixai, CCIP match, cluster, manual, Immich ML)
+  let faceRecords = $state(new Map<string, FaceRecord>());
+  $effect(() => {
+    const assetId = asset.id;
+    faceRecords = new Map();
+    if (!isOwner) {
+      return;
+    }
+    void loadFaceRecords(assetId).then((records) => {
+      if (asset.id === assetId) {
+        faceRecords = records;
+      }
+    });
+  });
   const visiblePeople = $derived(
     people
       .filter((p) => assetViewerManager.isShowingHiddenPeople || !p.isHidden)
@@ -104,6 +120,7 @@
     <div class="mt-2 grid {visiblePeople.length <= 6 ? 'grid-cols-3 gap-3' : 'grid-cols-4 gap-2'}">
       {#each visiblePeople as person (person.id)}
         {@const personFaces = faceManager.facesByPersonId.get(person.id) ?? []}
+        {@const source = faceSourceLabel(personFaces, faceRecords, person.id)}
         {@const isHighlighted = personFaces.some((f) => assetViewerManager.highlightedFaces.some((b) => b.id === f.id))}
         <a
           class="group outline-none"
@@ -125,6 +142,11 @@
             class="outline-offset-2 outline-immich-primary group-focus-visible:outline-2 dark:outline-immich-dark-primary"
           />
           <p class="mt-1 truncate font-medium" title={person.name}>{person.name}</p>
+          {#if source}
+            <p class="truncate text-xs font-light text-gray-500 dark:text-gray-400" title="Source: {source}">
+              {source}
+            </p>
+          {/if}
           {#if person.birthDate && person.formattedAge}
             <p class="font-light {visiblePeople.length > 6 ? 'text-xs' : ''}" title={person.formattedBirthDate!}>
               {person.formattedAge}

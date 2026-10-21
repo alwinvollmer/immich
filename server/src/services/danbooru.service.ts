@@ -75,11 +75,33 @@ export type TaggerResult = {
   tags: Record<'general' | 'character' | 'copyright' | 'rating', Record<string, number>>;
   heads: TaggerHead[];
 };
-type Marker = { model: string; at: string; tagIds: string[]; faceIds: string[] };
-type IndexEntry = { assetId: string; ownerId: string; vector: Float32Array };
+type Box = [number, number, number, number];
+/**
+ * where a face's person came from: pixai named the character (`pixai`: on a head, `whole`: no head
+ * found, whole-image face), CCIP fallback match (`ccip`), clustering (`cluster`), changed by hand in
+ * Immich (`manual`), or no person (`none`)
+ */
+export type FaceSource = 'pixai' | 'whole' | 'ccip' | 'cluster' | 'manual' | 'none';
+export type FaceRecord = { id: string; person: string | null; source: FaceSource; box: Box };
+type Marker = {
+  model: string;
+  at: string;
+  tagIds: string[];
+  faceIds: string[];
+  faces?: FaceRecord[];
+  // boxes of faces the user deleted: never recreated
+  removed?: Box[];
+};
+type IndexEntry = {
+  assetId: string;
+  ownerId: string;
+  vector: Float32Array;
+  person?: string | null;
+  source?: FaceSource;
+};
 type Candidate = { id: string; ownerId: string; previewPath: string };
 type FaceBox = { x1: number; y1: number; x2: number; y2: number };
-type NewFace = { box: FaceBox; personGroupId: string | null; vector?: Float32Array };
+type NewFace = { box: FaceBox; personGroupId: string | null; source: FaceSource; vector?: Float32Array };
 
 const normalize = (values: number[]) => {
   const vector = Float32Array.from(values);
@@ -111,6 +133,34 @@ export const distanceToReferences = (vector: Float32Array, references: Float32Ar
 
 export const cleanTagName = (name: string) => name.replaceAll('/', '_');
 export const personName = (tag: string) => tag.replaceAll('_', ' ');
+
+const toBox = ({ x1, y1, x2, y2 }: FaceBox): Box => [Math.round(x1), Math.round(y1), Math.round(x2), Math.round(y2)];
+
+const overlap = (a: Box, b: Box) => {
+  const w = Math.max(0, Math.min(a[2], b[2]) - Math.max(a[0], b[0]));
+  const h = Math.max(0, Math.min(a[3], b[3]) - Math.max(a[1], b[1]));
+  const area = (box: Box) => Math.max(0, box[2] - box[0]) * Math.max(0, box[3] - box[1]);
+  const union = area(a) + area(b) - w * h;
+  return union > 0 ? (w * h) / union : 0;
+};
+
+/**
+ * a face teaches the matching only when its person is trustworthy: named by pixai, set by hand
+ * (also: its person differs from the one this service recorded), or a cluster the user named.
+ * CCIP fallback matches never become references (they snowballed: ~730 heads ended up as Tifa).
+ */
+export const isReference = (entry: IndexEntry, person: { personGroupId: string | null; name: string | null }) => {
+  if (!person.personGroupId) {
+    return false;
+  }
+  if (entry.person !== undefined && entry.person !== person.personGroupId) {
+    return true;
+  }
+  if (entry.source === 'pixai' || entry.source === 'manual') {
+    return true;
+  }
+  return entry.source === 'cluster' && !!person.name;
+};
 
 @Injectable()
 export class DanbooruService extends BaseService {
@@ -219,13 +269,17 @@ export class DanbooruService extends BaseService {
         continue;
       }
       try {
-        const { assetId, ownerId, faces } = JSON.parse(await readFile(join(this.indexFolder, file), 'utf8')) as {
+        const { assetId, ownerId, faces, records } = JSON.parse(
+          await readFile(join(this.indexFolder, file), 'utf8'),
+        ) as {
           assetId: string;
           ownerId: string;
           faces: Record<string, number[]>;
+          records?: Record<string, { person: string | null; source: FaceSource }>;
         };
         for (const [faceId, values] of Object.entries(faces)) {
-          this.index.set(faceId, { assetId, ownerId, vector: normalize(values) });
+          const record = records?.[faceId];
+          this.index.set(faceId, { assetId, ownerId, vector: normalize(values), ...record });
         }
       } catch (error) {
         this.logger.warn(`Skipping unreadable CCIP file ${file}: ${error}`);
@@ -330,9 +384,16 @@ export class DanbooruService extends BaseService {
     const previous = previousRow?.value as Marker | undefined;
 
     const tagIds = await this.applyTags(assetId, ownerId, result, previous);
-    const faceIds = await this.applyFaces(assetId, ownerId, result, previous);
+    const { faces, removed } = await this.applyFaces(assetId, ownerId, result, previous);
 
-    const marker: Marker = { model: result.model, at: new Date().toISOString(), tagIds, faceIds };
+    const marker: Marker = {
+      model: result.model,
+      at: new Date().toISOString(),
+      tagIds,
+      faceIds: faces.map(({ id }) => id),
+      faces,
+      removed,
+    };
     await this.assetRepository.upsertMetadata(assetId, [{ key: DANBOORU_MARKER_KEY, value: marker }]);
     this.logger.debug(
       `Danbooru ${assetId}: ${tagIds.length} tags, characters [${Object.keys(result.tags.character).join(', ')}], ` +
@@ -369,74 +430,100 @@ export class DanbooruService extends BaseService {
   }
 
   private async applyFaces(assetId: string, ownerId: string, result: TaggerResult, previous?: Marker) {
-    // replace our own faces: those from the last run and the old worker's whole-image boxes
-    const ours = new Set(previous?.faceIds);
+    const records = new Map((previous?.faces ?? []).map((record) => [record.id, record]));
+    const oldFormat = new Set(previous?.faceIds);
     const existing = await this.personRepository.getFaces(assetId, { viewingUserId: ownerId });
+    const existingIds = new Set(existing.map(({ id }) => id));
     const affected = new Set<string>();
+
+    // faces of ours the user deleted are not recreated
+    const removed: Box[] = [...(previous?.removed ?? [])];
+    for (const record of records.values()) {
+      if (!existingIds.has(record.id)) {
+        removed.push(record.box);
+      }
+    }
+
+    // keep what the user changed by hand; replace the rest of ours and the old worker's whole-image boxes
+    const kept: FaceRecord[] = [];
     for (const face of existing) {
+      const record = records.get(face.id);
+      const person = face.personGroupId ?? null;
+      if (record && (record.source === 'manual' || record.person !== person)) {
+        kept.push({ ...record, person, source: 'manual' });
+        const entry = this.index.get(face.id);
+        if (entry) {
+          Object.assign(entry, { person, source: 'manual' });
+        }
+        continue;
+      }
       const wholeImage =
         face.boundingBoxX1 <= 1 &&
         face.boundingBoxY1 <= 1 &&
         face.boundingBoxX2 >= face.imageWidth - 1 &&
         face.boundingBoxY2 >= face.imageHeight - 1;
-      if (!(face.sourceType === SourceType.Manual && (ours.has(face.id) || wholeImage))) {
+      const ours = !!record || oldFormat.has(face.id) || (face.sourceType === SourceType.Manual && wholeImage);
+      if (!ours) {
         continue;
       }
-
-      if (face.personGroupId) {
-        affected.add(face.personGroupId);
+      if (person) {
+        affected.add(person);
       }
       await this.personRepository.deleteAssetFace(face.id);
       this.index.delete(face.id);
     }
 
     const references = await this.referencesFor(ownerId);
-    const faces = await this.assignFaces(ownerId, result, references);
+    const keptPeople = new Set(kept.map(({ person }) => person).filter(Boolean));
+    const blocked = [...kept.map(({ box }) => box), ...removed];
+    const assigned = await this.assignFaces(ownerId, result, references);
+    const faces = assigned.filter(
+      (face) =>
+        !(face.personGroupId && keptPeople.has(face.personGroupId)) &&
+        blocked.every((box) => overlap(box, toBox(face.box)) <= 0.5),
+    );
 
-    const faceIds: string[] = [];
-    const vectors: Record<string, number[]> = {};
+    const created: FaceRecord[] = [];
     for (const face of faces) {
       const id = randomUUID();
+      const box = toBox(face.box);
       await this.personRepository.createAssetFace({
         id,
         assetId,
         personGroupId: face.personGroupId,
         imageWidth: result.width,
         imageHeight: result.height,
-        boundingBoxX1: Math.round(face.box.x1),
-        boundingBoxY1: Math.round(face.box.y1),
-        boundingBoxX2: Math.round(face.box.x2),
-        boundingBoxY2: Math.round(face.box.y2),
+        boundingBoxX1: box[0],
+        boundingBoxY1: box[1],
+        boundingBoxX2: box[2],
+        boundingBoxY2: box[3],
         sourceType: SourceType.Manual,
       });
-      faceIds.push(id);
+      created.push({ id, person: face.personGroupId, source: face.source, box });
       if (face.personGroupId) {
         affected.add(face.personGroupId);
       }
-      if (!face.vector) {
-        continue;
+      if (face.vector) {
+        this.index.set(id, { assetId, ownerId, vector: face.vector, person: face.personGroupId, source: face.source });
       }
-
-      vectors[id] = Array.from(face.vector, (value) => Math.round(value * 1e6) / 1e6);
-      this.index.set(id, { assetId, ownerId, vector: face.vector });
     }
-    await this.writeVectors(assetId, ownerId, vectors);
+    await this.saveAssetIndex(assetId, ownerId);
     await this.refreshFeaturePhotos(ownerId, affected);
-    return faceIds;
+    return { faces: [...kept, ...created], removed };
   }
 
-  /** CCIP references per person of this owner, from the current face → person assignments */
+  /** CCIP references per person of this owner: only faces whose person can be trusted (isReference) */
   private async referencesFor(ownerId: string) {
     const faceIds = [...this.index].filter(([, entry]) => entry.ownerId === ownerId).map(([id]) => id);
     const references = new Map<string, Float32Array[]>();
-    for (const { id, personGroupId } of await this.personRepository.getFacePersons(faceIds)) {
-      const entry = this.index.get(id);
-      if (!personGroupId || !entry) {
+    for (const row of await this.personRepository.getFacePersons(faceIds)) {
+      const entry = this.index.get(row.id);
+      if (!entry || !isReference(entry, row)) {
         continue;
       }
-      const list = references.get(personGroupId) ?? [];
+      const list = references.get(row.personGroupId!) ?? [];
       list.push(entry.vector);
-      references.set(personGroupId, list);
+      references.set(row.personGroupId!, list);
     }
     return references;
   }
@@ -472,7 +559,7 @@ export class DanbooruService extends BaseService {
         continue;
       }
 
-      faces.push({ ...heads[head], personGroupId: person });
+      faces.push({ ...heads[head], personGroupId: person, source: 'pixai' });
       freeHeads.delete(head);
       freeCharacters.delete(person);
     }
@@ -480,13 +567,13 @@ export class DanbooruService extends BaseService {
     if (freeHeads.size === 1 && freeCharacters.size === 1) {
       const [head] = freeHeads;
       const [person] = freeCharacters;
-      faces.push({ ...heads[head], personGroupId: person });
+      faces.push({ ...heads[head], personGroupId: person, source: 'pixai' });
       freeHeads.clear();
       freeCharacters.clear();
     }
     // characters without a head: whole-image face, as the old worker did
     for (const person of freeCharacters) {
-      faces.push({ box: whole, personGroupId: person });
+      faces.push({ box: whole, personGroupId: person, source: 'whole' });
     }
     // heads without a pixai character: strict match against all known characters, else unassigned
     const used = new Set(faces.map(({ personGroupId }) => personGroupId));
@@ -504,13 +591,14 @@ export class DanbooruService extends BaseService {
       if (best) {
         used.add(best.person);
       }
-      faces.push({ ...heads[head], personGroupId: best?.person ?? null });
+      faces.push({ ...heads[head], personGroupId: best?.person ?? null, source: best ? 'ccip' : 'none' });
     }
     return faces;
   }
 
   async maintenance() {
     await this.revealAutoHidden();
+    await this.deleteEmptyClusters();
     const owners = new Set(this.index.values().map(({ ownerId }) => ownerId));
     for (const ownerId of owners) {
       const stats = await this.maintainOwner(ownerId);
@@ -528,14 +616,20 @@ export class DanbooruService extends BaseService {
     const rows = await this.personRepository.getFacePersons(faceIds);
     const references = new Map<string, Float32Array[]>();
     const unassigned = new Map<string, string[]>();
-    for (const { id, personGroupId } of rows) {
-      const entry = this.index.get(id)!;
-      if (personGroupId) {
-        references.set(personGroupId, [...(references.get(personGroupId) ?? []), entry.vector]);
-      } else {
-        unassigned.set(entry.assetId, [...(unassigned.get(entry.assetId) ?? []), id]);
+    for (const row of rows) {
+      const entry = this.index.get(row.id)!;
+      if (!row.personGroupId) {
+        unassigned.set(entry.assetId, [...(unassigned.get(entry.assetId) ?? []), row.id]);
+      } else if (isReference(entry, row)) {
+        references.set(row.personGroupId, [...(references.get(row.personGroupId) ?? []), entry.vector]);
       }
     }
+    // face changes per image, written to its marker and CCIP file at the end (null = face deleted)
+    const changes = new Map<string, Map<string, { person: string; source: FaceSource } | null>>();
+    const change = (faceId: string, value: { person: string; source: FaceSource } | null, assetId?: string) => {
+      const asset = assetId ?? this.index.get(faceId)!.assetId;
+      changes.set(asset, (changes.get(asset) ?? new Map()).set(faceId, value));
+    };
 
     const affected = new Set<string>();
     const remaining: string[] = [];
@@ -576,6 +670,8 @@ export class DanbooruService extends BaseService {
 
         await this.personRepository.reassignFace(head, face.personGroupId!);
         await this.personRepository.deleteAssetFace(face.id);
+        change(head, { person: face.personGroupId!, source: 'pixai' });
+        change(face.id, null, assetId);
         affected.add(face.personGroupId!);
         freeHeads.delete(head);
         usedFaces.add(face.id);
@@ -596,6 +692,7 @@ export class DanbooruService extends BaseService {
         }
         if (best) {
           await this.personRepository.reassignFace(head, best.person);
+          change(head, { person: best.person, source: 'ccip' });
           present.add(best.person);
           affected.add(best.person);
           stats.matched++;
@@ -630,6 +727,7 @@ export class DanbooruService extends BaseService {
         await this.personRepository.create({ ownerId, personGroupId: group.id, name: '' });
         for (const id of members) {
           await this.personRepository.reassignFace(id, group.id);
+          change(id, { person: group.id, source: 'cluster' });
         }
         affected.add(group.id);
         stats.clusters++;
@@ -637,8 +735,53 @@ export class DanbooruService extends BaseService {
       }
     }
     stats.left = remaining.length - stats.clustered;
+    for (const [assetId, faceChanges] of changes) {
+      await this.recordChanges(assetId, ownerId, faceChanges);
+    }
     await this.refreshFeaturePhotos(ownerId, affected);
     return stats;
+  }
+
+  /** apply maintenance changes to an image's marker and CCIP file (null = the face was deleted) */
+  private async recordChanges(
+    assetId: string,
+    ownerId: string,
+    faceChanges: Map<string, { person: string; source: FaceSource } | null>,
+  ) {
+    for (const [faceId, value] of faceChanges) {
+      const entry = this.index.get(faceId);
+      if (entry && value) {
+        Object.assign(entry, value);
+      }
+    }
+    await this.saveAssetIndex(assetId, ownerId);
+
+    const row = await this.assetRepository.getMetadataByKey(assetId, DANBOORU_MARKER_KEY);
+    const marker = row?.value as Marker | undefined;
+    if (!marker?.faces) {
+      return;
+    }
+    const faces = marker.faces
+      .filter(({ id }) => faceChanges.get(id) !== null)
+      .map((record) => ({ ...record, ...faceChanges.get(record.id) }));
+    await this.assetRepository.upsertMetadata(assetId, [
+      { key: DANBOORU_MARKER_KEY, value: { ...marker, faces, faceIds: faces.map(({ id }) => id) } },
+    ]);
+  }
+
+  /** unnamed people (clusters) that lost all their faces, e.g. after a remap */
+  private async deleteEmptyClusters() {
+    const people = await this.personRepository.getPeopleAssetCounts();
+    const empty = new Map<string, string[]>();
+    for (const { personGroupId, ownerId, name, assets } of people) {
+      if (assets === 0 && !name) {
+        empty.set(ownerId, [...(empty.get(ownerId) ?? []), personGroupId]);
+      }
+    }
+    for (const [ownerId, ids] of empty) {
+      await this.personRepository.delete(ids, ownerId);
+      this.logger.log(`Danbooru maintenance: deleted ${ids.length} empty unnamed people`);
+    }
   }
 
   /** person (group id) with this exact name, created when missing */
@@ -682,13 +825,21 @@ export class DanbooruService extends BaseService {
     }
   }
 
-  private async writeVectors(assetId: string, ownerId: string, faces: Record<string, number[]>) {
+  /** the CCIP file of an image: its indexed faces with vector, person and source */
+  private async saveAssetIndex(assetId: string, ownerId: string) {
     const path = join(this.indexFolder, `${assetId}.json`);
-    if (Object.keys(faces).length === 0) {
+    const entries = [...this.index].filter(([, entry]) => entry.assetId === assetId);
+    if (entries.length === 0) {
       await rm(path, { force: true });
       return;
     }
+    const faces: Record<string, number[]> = {};
+    const records: Record<string, { person: string | null; source: FaceSource }> = {};
+    for (const [id, entry] of entries) {
+      faces[id] = Array.from(entry.vector, (value) => Math.round(value * 1e6) / 1e6);
+      records[id] = { person: entry.person ?? null, source: entry.source ?? 'none' };
+    }
     await mkdir(this.indexFolder, { recursive: true });
-    await writeFile(path, JSON.stringify({ assetId, ownerId, faces }));
+    await writeFile(path, JSON.stringify({ assetId, ownerId, faces, records }));
   }
 }

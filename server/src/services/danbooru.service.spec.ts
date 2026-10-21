@@ -58,7 +58,10 @@ const wholeImageFace = (id: string, personGroupId: string) => ({
 
 const loadIndex = async (
   sut: DanbooruService,
-  files: Record<string, { assetId: string; faces: Record<string, number[]> }>,
+  files: Record<
+    string,
+    { assetId: string; faces: Record<string, number[]>; records?: Record<string, { person: string; source: string }> }
+  >,
 ) => {
   vi.mocked(readdir).mockResolvedValue(Object.keys(files).map((name) => `${name}.json`) as never);
   vi.mocked(readFile).mockImplementation((path) =>
@@ -88,6 +91,7 @@ describe(DanbooruService.name, () => {
     let groups = 0;
     mocks.person.createGroup.mockImplementation(() => Promise.resolve({ id: `p-new-${++groups}` } as never));
     mocks.person.create.mockResolvedValue({} as never);
+    mocks.person.getPeopleAssetCounts.mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -127,7 +131,9 @@ describe(DanbooruService.name, () => {
         result({ tags: { ...result().tags, character: { megumin: 0.9 } } }),
         new Map(),
       );
-      expect(faces).toEqual([{ personGroupId: 'p-megumin', box: { x1: 0, y1: 0, x2: 1000, y2: 800 } }]);
+      expect(faces).toEqual([
+        { personGroupId: 'p-megumin', source: 'whole', box: { x1: 0, y1: 0, x2: 1000, y2: 800 } },
+      ]);
     });
 
     it('pairs two heads with two characters by their references', async () => {
@@ -250,7 +256,12 @@ describe(DanbooruService.name, () => {
       expect(mocks.asset.upsertMetadata).toHaveBeenCalledWith('asset-1', [
         {
           key: DANBOORU_MARKER_KEY,
-          value: expect.objectContaining({ model: 'pixai-tagger-v1.0', tagIds: ['t-1', 't-2', 't-3'] }),
+          value: expect.objectContaining({
+            model: 'pixai-tagger-v1.0',
+            tagIds: ['t-1', 't-2', 't-3'],
+            faces: [expect.objectContaining({ person: 'p-megumin', source: 'pixai', box: [100, 50, 300, 250] })],
+            removed: [],
+          }),
         },
       ]);
     });
@@ -266,21 +277,92 @@ describe(DanbooruService.name, () => {
 
       expect(mocks.tag.replaceAssetTags).toHaveBeenCalledWith('asset-1', ['t-mine', 't-1', 't-2', 't-3']);
     });
+
+    it('keeps a face the user reassigned and does not create a second face on that head', async () => {
+      const box = [100, 50, 300, 250];
+      mocks.asset.getMetadataByKey.mockResolvedValue({
+        value: {
+          model: 'old',
+          at: '',
+          tagIds: [],
+          faceIds: ['f-1'],
+          faces: [{ id: 'f-1', person: 'p-megumin', source: 'pixai', box }],
+        },
+      } as never);
+      mocks.tag.getAssetTagIds.mockResolvedValue([]);
+      mocks.person.getFaces.mockResolvedValue([
+        {
+          id: 'f-1',
+          personGroupId: 'p-yunyun',
+          sourceType: SourceType.Manual,
+          imageWidth: 1000,
+          imageHeight: 800,
+          boundingBoxX1: 100,
+          boundingBoxY1: 50,
+          boundingBoxX2: 300,
+          boundingBoxY2: 250,
+        },
+      ] as never);
+
+      await sut.processAsset(candidate);
+
+      expect(mocks.person.deleteAssetFace).not.toHaveBeenCalled();
+      expect(mocks.person.createAssetFace).not.toHaveBeenCalled();
+      expect(mocks.asset.upsertMetadata).toHaveBeenCalledWith('asset-1', [
+        {
+          key: DANBOORU_MARKER_KEY,
+          value: expect.objectContaining({ faces: [{ id: 'f-1', person: 'p-yunyun', source: 'manual', box }] }),
+        },
+      ]);
+    });
+
+    it('does not recreate a face the user deleted', async () => {
+      mocks.asset.getMetadataByKey.mockResolvedValue({
+        value: {
+          model: 'old',
+          at: '',
+          tagIds: [],
+          faceIds: ['f-1'],
+          faces: [{ id: 'f-1', person: 'p-megumin', source: 'pixai', box: [100, 50, 300, 250] }],
+        },
+      } as never);
+      mocks.tag.getAssetTagIds.mockResolvedValue([]);
+      mocks.person.getFaces.mockResolvedValue([]);
+
+      await sut.processAsset(candidate);
+
+      expect(mocks.person.createAssetFace).not.toHaveBeenCalled();
+      expect(mocks.asset.upsertMetadata).toHaveBeenCalledWith('asset-1', [
+        {
+          key: DANBOORU_MARKER_KEY,
+          value: expect.objectContaining({ faces: [], removed: [[100, 50, 300, 250]] }),
+        },
+      ]);
+    });
   });
 
   describe('maintenance', () => {
     it('pairs unassigned heads with the characters pixai named on the image', async () => {
       await loadIndex(sut, {
-        refs: { assetId: 'refs', faces: { r1: axis(0), r2: axis(0, 0.05), r3: axis(3), r4: axis(3, 0.05) } },
+        refs: {
+          assetId: 'refs',
+          faces: { r1: axis(0), r2: axis(0, 0.05), r3: axis(3), r4: axis(3, 0.05) },
+          records: {
+            r1: { person: 'p-megumin', source: 'pixai' },
+            r2: { person: 'p-megumin', source: 'pixai' },
+            r3: { person: 'p-yunyun', source: 'pixai' },
+            r4: { person: 'p-yunyun', source: 'pixai' },
+          },
+        },
         multi: { assetId: 'multi', faces: { h1: axis(3, 0.02), h2: axis(0, 0.02) } },
       });
       mocks.person.getFacePersons.mockResolvedValue([
-        { id: 'r1', personGroupId: 'p-megumin', ownerId },
-        { id: 'r2', personGroupId: 'p-megumin', ownerId },
-        { id: 'r3', personGroupId: 'p-yunyun', ownerId },
-        { id: 'r4', personGroupId: 'p-yunyun', ownerId },
-        { id: 'h1', personGroupId: null, ownerId },
-        { id: 'h2', personGroupId: null, ownerId },
+        { id: 'r1', personGroupId: 'p-megumin', ownerId, name: 'p-megumin' },
+        { id: 'r2', personGroupId: 'p-megumin', ownerId, name: 'p-megumin' },
+        { id: 'r3', personGroupId: 'p-yunyun', ownerId, name: 'p-yunyun' },
+        { id: 'r4', personGroupId: 'p-yunyun', ownerId, name: 'p-yunyun' },
+        { id: 'h1', personGroupId: null, ownerId, name: null },
+        { id: 'h2', personGroupId: null, ownerId, name: null },
       ]);
       mocks.person.getFaces.mockResolvedValue([
         wholeImageFace('w-megumin', 'p-megumin'),
@@ -298,15 +380,19 @@ describe(DanbooruService.name, () => {
     it('matches a lone head later and clusters the unknown ones into an unnamed person', async () => {
       const unknown = Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`u${i}`, axis(6, i * 0.01)]));
       await loadIndex(sut, {
-        refs: { assetId: 'refs', faces: { r1: axis(0), r2: axis(0, 0.05) } },
+        refs: {
+          assetId: 'refs',
+          faces: { r1: axis(0), r2: axis(0, 0.05) },
+          records: { r1: { person: 'p-megumin', source: 'pixai' }, r2: { person: 'p-megumin', source: 'pixai' } },
+        },
         lone: { assetId: 'lone', faces: { h1: axis(0, 0.02) } },
         unknown: { assetId: 'unknown', faces: unknown },
       });
       mocks.person.getFacePersons.mockResolvedValue([
-        { id: 'r1', personGroupId: 'p-megumin', ownerId },
-        { id: 'r2', personGroupId: 'p-megumin', ownerId },
-        { id: 'h1', personGroupId: null, ownerId },
-        ...Object.keys(unknown).map((id) => ({ id, personGroupId: null, ownerId })),
+        { id: 'r1', personGroupId: 'p-megumin', ownerId, name: 'p-megumin' },
+        { id: 'r2', personGroupId: 'p-megumin', ownerId, name: 'p-megumin' },
+        { id: 'h1', personGroupId: null, ownerId, name: null },
+        ...Object.keys(unknown).map((id) => ({ id, personGroupId: null, ownerId, name: null })),
       ]);
       mocks.person.getFaces.mockResolvedValue([]);
       const fetchMock = vi.fn().mockResolvedValue(Response.json({ labels: [0, 0, 0, 0, 0] }));
@@ -323,13 +409,68 @@ describe(DanbooruService.name, () => {
     });
   });
 
+  describe('references', () => {
+    it('never learns from CCIP fallback matches', async () => {
+      await loadIndex(sut, {
+        refs: {
+          assetId: 'refs',
+          faces: { c1: axis(0), c2: axis(0, 0.05) },
+          records: { c1: { person: 'p-megumin', source: 'ccip' }, c2: { person: 'p-megumin', source: 'ccip' } },
+        },
+        lone: { assetId: 'lone', faces: { h1: axis(0, 0.02) } },
+      });
+      mocks.person.getFacePersons.mockResolvedValue([
+        { id: 'c1', personGroupId: 'p-megumin', ownerId, name: 'megumin' },
+        { id: 'c2', personGroupId: 'p-megumin', ownerId, name: 'megumin' },
+        { id: 'h1', personGroupId: null, ownerId, name: null },
+      ]);
+      mocks.person.getFaces.mockResolvedValue([]);
+
+      await sut.maintenance();
+
+      expect(mocks.person.reassignFace).not.toHaveBeenCalled();
+    });
+
+    it('learns from faces the user moved to another person', async () => {
+      await loadIndex(sut, {
+        refs: {
+          assetId: 'refs',
+          faces: { c1: axis(0), c2: axis(0, 0.05) },
+          records: { c1: { person: 'p-tifa', source: 'ccip' }, c2: { person: 'p-tifa', source: 'ccip' } },
+        },
+        lone: { assetId: 'lone', faces: { h1: axis(0, 0.02) } },
+      });
+      mocks.person.getFacePersons.mockResolvedValue([
+        { id: 'c1', personGroupId: 'p-megumin', ownerId, name: 'megumin' },
+        { id: 'c2', personGroupId: 'p-megumin', ownerId, name: 'megumin' },
+        { id: 'h1', personGroupId: null, ownerId, name: null },
+      ]);
+      mocks.person.getFaces.mockResolvedValue([]);
+
+      await sut.maintenance();
+
+      expect(mocks.person.reassignFace).toHaveBeenCalledWith('h1', 'p-megumin');
+    });
+
+    it('deletes unnamed people without faces', async () => {
+      mocks.person.getPeopleAssetCounts.mockResolvedValue([
+        { personGroupId: 'p-empty-cluster', ownerId, isHidden: false, assets: 0, name: '' },
+        { personGroupId: 'p-empty-named', ownerId, isHidden: false, assets: 0, name: 'megumin' },
+      ]);
+
+      await sut.maintenance();
+
+      expect(mocks.person.delete).toHaveBeenCalledExactlyOnceWith(['p-empty-cluster'], ownerId);
+    });
+  });
+
   describe('auto-hide', () => {
     it('hides every visible person with a single image on the first start', async () => {
       vi.mocked(readFile).mockRejectedValue(new Error('ENOENT'));
       mocks.person.getPeopleAssetCounts.mockResolvedValue([
-        { personGroupId: 'p-one', ownerId, isHidden: false, assets: 1 },
-        { personGroupId: 'p-two', ownerId, isHidden: false, assets: 2 },
-        { personGroupId: 'p-hidden-by-user', ownerId, isHidden: true, assets: 1 },
+        { personGroupId: 'p-one', ownerId, isHidden: false, assets: 1, name: 'p-one' },
+        { personGroupId: 'p-two', ownerId, isHidden: false, assets: 2, name: 'p-two' },
+        { personGroupId: 'p-hidden-by-user', ownerId, isHidden: true, assets: 1, name: 'p-hidden-by-user' },
       ]);
 
       await sut.loadAutoHidden();
@@ -345,8 +486,8 @@ describe(DanbooruService.name, () => {
       vi.mocked(readFile).mockResolvedValue(JSON.stringify({ ids: ['p-one', 'p-two', 'p-gone'] }) as never);
       await sut.loadAutoHidden();
       mocks.person.getPeopleAssetCounts.mockResolvedValue([
-        { personGroupId: 'p-one', ownerId, isHidden: true, assets: 1 },
-        { personGroupId: 'p-two', ownerId, isHidden: true, assets: 2 },
+        { personGroupId: 'p-one', ownerId, isHidden: true, assets: 1, name: 'p-one' },
+        { personGroupId: 'p-two', ownerId, isHidden: true, assets: 2, name: 'p-two' },
       ]);
 
       await sut.revealAutoHidden();
