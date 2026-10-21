@@ -37,6 +37,7 @@ import {
   anyUuid,
   asUuid,
   hasPeople,
+  hasPersonInStack,
   inAnyAlbum,
   inSharedAlbum,
   removeUndefinedKeys,
@@ -53,6 +54,7 @@ import {
   withOwner,
   withSmartSearch,
   withTagId,
+  withTagIdInStack,
   withTags,
 } from 'src/utils/database.js';
 import { globToPostgresRegex } from 'src/utils/misc.js';
@@ -784,7 +786,10 @@ export class AssetRepository {
               .where('album_asset.albumId', '=', asUuid(options.albumId!)),
           )
           .$if(!!options.albumIds?.length, (qb) => inAnyAlbum(qb, options.albumIds!))
-          .$if(!!options.personId, (qb) => hasPeople(qb, [options.personId!]))
+          // custom: stacked timelines show a cover when any stack member has the person/tag
+          .$if(!!options.personId, (qb) =>
+            options.withStacked ? hasPersonInStack(qb, options.personId!) : hasPeople(qb, [options.personId!]),
+          )
           .$if(!!options.withStacked, (qb) =>
             qb
               .leftJoin('stack', (join) =>
@@ -804,7 +809,9 @@ export class AssetRepository {
           .$if(options.isDuplicate !== undefined, (qb) =>
             qb.where('asset.duplicateId', options.isDuplicate ? 'is not' : 'is', null),
           )
-          .$if(!!options.tagId, (qb) => withTagId(qb, options.tagId!)),
+          .$if(!!options.tagId, (qb) =>
+            options.withStacked ? withTagIdInStack(qb, options.tagId!) : withTagId(qb, options.tagId!),
+          ),
       )
       .selectFrom('asset')
       .select(sql<string>`("timeBucket" AT TIME ZONE 'UTC')::date::text`.as('timeBucket'))
@@ -884,7 +891,10 @@ export class AssetRepository {
             ),
           )
           .$if(!!options.albumIds?.length, (qb) => inAnyAlbum(qb, options.albumIds!))
-          .$if(!!options.personId, (qb) => hasPeople(qb, [options.personId!]))
+          // custom: stacked timelines show a cover when any stack member has the person/tag
+          .$if(!!options.personId, (qb) =>
+            options.withStacked ? hasPersonInStack(qb, options.personId!) : hasPeople(qb, [options.personId!]),
+          )
           .$if(!!options.userIds, (qb) =>
             qb.where((eb) => {
               const isOwner = eb('asset.ownerId', '=', anyUuid(options.userIds!));
@@ -924,7 +934,9 @@ export class AssetRepository {
             qb.where('asset.duplicateId', options.isDuplicate ? 'is not' : 'is', null),
           )
           .$if(!!options.isTrashed, (qb) => qb.where('asset.status', '!=', AssetStatus.Deleted))
-          .$if(!!options.tagId, (qb) => withTagId(qb, options.tagId!))
+          .$if(!!options.tagId, (qb) =>
+            options.withStacked ? withTagIdInStack(qb, options.tagId!) : withTagId(qb, options.tagId!),
+          )
           .orderBy(
             options.orderBy === AssetOrderBy.CreatedAt
               ? sql`"createdAt"`

@@ -75,7 +75,13 @@
   let thumbnailData = $derived(getPeopleThumbnailUrl(person));
 
   let timelineManager = $state<TimelineManager>() as TimelineManager;
-  const options = $derived({ visibility: AssetVisibility.Timeline, personId: data.person.id, withPartners: true });
+  // custom: withStacked — one tile per stack (the cover), shown when any member has the person
+  const options = $derived({
+    visibility: AssetVisibility.Timeline,
+    personId: data.person.id,
+    withPartners: true,
+    withStacked: true,
+  });
 
   let viewMode: PersonPageViewMode = $state(PersonPageViewMode.VIEW_ASSETS);
   let isEditingName = $state(false);
@@ -350,6 +356,7 @@
       {person}
       bind:timelineManager
       {options}
+      withStacked={true}
       assetInteraction={assetMultiSelectManager}
       isSelectionMode={viewMode === PersonPageViewMode.SELECT_PERSON}
       singleSelect={viewMode === PersonPageViewMode.SELECT_PERSON}

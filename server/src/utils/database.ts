@@ -288,6 +288,25 @@ export function hasPeople<O>(qb: SelectQueryBuilder<DB, 'asset', O>, personGroup
   );
 }
 
+// custom: stack-aware person filter for stacked timelines — a stack cover matches when the cover
+// or any other (non-deleted) member of its stack shows the person
+export function hasPersonInStack<O>(qb: SelectQueryBuilder<DB, 'asset', O>, personGroupId: string) {
+  return qb.where((eb) =>
+    eb.exists(
+      eb
+        .selectFrom('asset_face')
+        .innerJoin('asset as member', 'member.id', 'asset_face.assetId')
+        .where('asset_face.personGroupId', '=', asUuid(personGroupId))
+        .where('asset_face.deletedAt', 'is', null)
+        .where('asset_face.isVisible', 'is', true)
+        .where('member.deletedAt', 'is', null)
+        .where((eb) =>
+          eb.or([eb('member.id', '=', eb.ref('asset.id')), eb('member.stackId', '=', eb.ref('asset.stackId'))]),
+        ),
+    ),
+  );
+}
+
 export function inSharedAlbum(userId: string, assetId: 'asset.id' | 'asset_face.assetId') {
   const eb = expressionBuilder<DB, 'asset' | 'asset_face'>();
   return eb.exists(
@@ -381,6 +400,23 @@ export function withTagId<O>(qb: SelectQueryBuilder<DB, 'asset', O>, tagId: stri
         .innerJoin('tag_asset', 'tag_asset.tagId', 'tag_closure.id_descendant')
         .whereRef('tag_asset.assetId', '=', 'asset.id')
         .where('tag_closure.id_ancestor', '=', tagId),
+    ),
+  );
+}
+
+// custom: stack-aware tag filter for stacked timelines (see hasPersonInStack)
+export function withTagIdInStack<O>(qb: SelectQueryBuilder<DB, 'asset', O>, tagId: string) {
+  return qb.where((eb) =>
+    eb.exists(
+      eb
+        .selectFrom('tag_closure')
+        .innerJoin('tag_asset', 'tag_asset.tagId', 'tag_closure.id_descendant')
+        .innerJoin('asset as member', 'member.id', 'tag_asset.assetId')
+        .where('tag_closure.id_ancestor', '=', tagId)
+        .where('member.deletedAt', 'is', null)
+        .where((eb) =>
+          eb.or([eb('member.id', '=', eb.ref('asset.id')), eb('member.stackId', '=', eb.ref('asset.stackId'))]),
+        ),
     ),
   );
 }
