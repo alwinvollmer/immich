@@ -6,6 +6,9 @@ v2 (used by the Immich fork):
             "heads": [{"box": [x1, y1, x2, y2], "score", "ccip": [768 floats]}]}
         pixai-tagger-v1.0 + anime head detection + CCIP character embeddings
         (heads=0 skips head detection + CCIP: the server reuses heads it stored before).
+  POST /v2/regions  multipart: image=<file>, boxes=<json [[x1, y1, x2, y2], ...]>, floor=<float, default 0.05>
+        -> {"regions": [{"box": [...], "character": {tag: score}}]}: pixai on each head region, enlarged
+        to head + upper body (characters are recognised from hair, clothes and accessories too)
   POST /v2/cluster  {"embeddings": [[...]], "min_samples": 3} -> {"labels": [...]}
   GET  /v2/info     -> model name, default thresholds, device
 
@@ -107,6 +110,37 @@ def analyze(image: UploadFile = File(...), thresholds: str = Form("{}"), heads: 
     from pixai10 import MODEL_NAME
 
     return {"model": MODEL_NAME, "width": img.width, "height": img.height, "tags": tags, "heads": found}
+
+
+def _region(box: list, width: int, height: int) -> tuple:
+    """head box -> head + upper body: 2x wider, from half a head above to 3 heads below"""
+    x1, y1, x2, y2 = box
+    w, h = x2 - x1, y2 - y1
+    cx = (x1 + x2) / 2
+    return (
+        max(0, int(cx - w)),
+        max(0, int(y1 - h * 0.5)),
+        min(width, int(cx + w)),
+        min(height, int(y2 + h * 3)),
+    )
+
+
+@app.post("/v2/regions")
+def regions(image: UploadFile = File(...), boxes: str = Form(...), floor: float = Form(0.05)):
+    img = _open_image(image.file.read()).convert("RGB")
+    try:
+        box_list = json.loads(boxes)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="boxes must be JSON")
+    out = []
+    with _v2_lock:
+        started = time.time()
+        for box in box_list:
+            crop = img.crop(_region(box, img.width, img.height))
+            tags = _v2["tagger"].predict(crop, {"character": floor, "general": 1.01, "copyright": 1.01})
+            out.append({"box": box, "character": tags["character"]})
+    log.info(f"v2 regions: {len(box_list)} boxes, {time.time() - started:.1f}s")
+    return {"regions": out}
 
 
 class ClusterRequest(BaseModel):
