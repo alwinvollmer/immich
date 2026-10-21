@@ -120,6 +120,13 @@ merging a new upstream release. Back to stock = point `IMMICH_SERVER_IMAGE` at
   syncs to the phone). A marker-less image loses all its tags first; later runs only replace the
   tags in the marker. Maintenance pass when idle (≤ every 12 h): pair/match unassigned heads,
   OPTICS-cluster the rest into unnamed people. Character names = Danbooru tags with `_` → space.
+  Every face's source is recorded in the marker (`faces: [{id, person, source, box}]`: pixai | whole |
+  ccip | cluster | manual | none) and shown in the info panel. CCIP references only from pixai, manual
+  (person differs from the recorded one) and named clusters — never ccip (the fallback snowballed into
+  ~730 wrong Tifa heads; `IMMICH_DANBOORU_MATCH_DISTANCE=0` keeps it OFF until recalibrated).
+  Pairing heads with the characters pixai named = `IMMICH_DANBOORU_PAIR_DISTANCE` (0.42), independent.
+  Re-tagging keeps faces the user reassigned and never recreates faces the user deleted.
+  Faces-only re-run: set a marker's model to `recheck-faces` (pixai only, stored heads reused, ~0.9 s/img GPU).
   People with one image are hidden until a second image shows them (list
   `/data/custom/danbooru-autohidden.json`; new characters start hidden; manual hide/unhide is never touched).
 - Immich face detection only on camera photos (`IMMICH_FACES_CAMERA_ONLY=1`: EXIF make required).
