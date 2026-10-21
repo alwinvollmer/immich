@@ -120,6 +120,8 @@ merging a new upstream release. Back to stock = point `IMMICH_SERVER_IMAGE` at
   syncs to the phone). A marker-less image loses all its tags first; later runs only replace the
   tags in the marker. Maintenance pass when idle (≤ every 12 h): pair/match unassigned heads,
   OPTICS-cluster the rest into unnamed people. Character names = Danbooru tags with `_` → space.
+  People with one image are hidden until a second image shows them (list
+  `/data/custom/danbooru-autohidden.json`; new characters start hidden; manual hide/unhide is never touched).
 - Immich face detection only on camera photos (`IMMICH_FACES_CAMERA_ONLY=1`: EXIF make required).
 - Upscale: viewer ⋮ "Upscale ×2/×4" → `UpscaleService` (in-memory jobs, `on_upscale_update`
   websocket events) → `UpscalePanel`; result = new stack cover with the original's metadata/tags.

@@ -57,7 +57,7 @@ an optional album; 5 albums in the sidebar; archiving workaround removed.
    Danbooru names. Forced remap of all 11,375 images on the GPU tagger (maintenance: 258 heads
    paired, 695 matched later, 50 new unnamed people). immich-api-worker + its workflow removed;
    3,359 Immich ML junk faces on non-camera images deleted, `minFaces` back to 3; 296 empty
-   People deleted. Open: decide about People with one image (1,033 named).
+   People deleted; 1,032 People with one image hidden until a second image arrives (3c797b0).
 5. **Mobile app (later)** — own APK via Obtainium: point /api/server/apk-links
    (server.service.ts) at this fork's releases.
 
