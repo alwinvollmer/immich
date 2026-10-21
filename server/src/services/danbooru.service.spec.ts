@@ -447,6 +447,36 @@ describe(DanbooruService.name, () => {
     });
   });
 
+  describe('pairing', () => {
+    it('moves a head out of an unnamed cluster when pixai named its character on the image', async () => {
+      await loadIndex(sut, {
+        refs: {
+          assetId: 'refs',
+          faces: { r1: axis(0), r2: axis(0, 0.05) },
+          records: { r1: { person: 'p-megumin', source: 'pixai' }, r2: { person: 'p-megumin', source: 'pixai' } },
+        },
+        multi: {
+          assetId: 'multi',
+          faces: { h1: axis(0, 0.02) },
+          records: { h1: { person: 'p-cluster', source: 'cluster' } },
+        },
+      });
+      mocks.person.getFacePersons.mockResolvedValue([
+        { id: 'r1', personGroupId: 'p-megumin', ownerId, name: 'megumin' },
+        { id: 'r2', personGroupId: 'p-megumin', ownerId, name: 'megumin' },
+        { id: 'h1', personGroupId: 'p-cluster', ownerId, name: '' },
+      ]);
+      mocks.person.getFaces.mockImplementation((assetId) =>
+        Promise.resolve((assetId === 'multi' ? [wholeImageFace('w-megumin', 'p-megumin')] : []) as never),
+      );
+
+      await sut.maintenance();
+
+      expect(mocks.person.reassignFace).toHaveBeenCalledExactlyOnceWith('h1', 'p-megumin');
+      expect(mocks.person.deleteAssetFace).toHaveBeenCalledWith('w-megumin');
+    });
+  });
+
   describe('interrupted maintenance', () => {
     it('records the pairing even when the clustering fails', async () => {
       const unknown = Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`u${i}`, axis(6, i * 0.01)]));

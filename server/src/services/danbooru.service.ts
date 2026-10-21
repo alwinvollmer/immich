@@ -56,7 +56,8 @@ const THRESHOLDS = process.env.IMMICH_DANBOORU_THRESHOLDS || '{}';
 // cosine distance; mean of a character's 3 closest references (CCIP test: ~95 % correct, ~65 % assigned)
 const MATCH_DISTANCE = Number(process.env.IMMICH_DANBOORU_MATCH_DISTANCE || 0.21);
 // a head on an image whose characters pixai named only needs to be closer to one of them than this
-const PAIR_DISTANCE = MATCH_DISTANCE * 2;
+// (independent of the fallback: pixai already said the character is on the image)
+const PAIR_DISTANCE = Number(process.env.IMMICH_DANBOORU_PAIR_DISTANCE || 0.42);
 const CLUSTER_MIN = Number(process.env.IMMICH_DANBOORU_CLUSTER_MIN || 5);
 const MAINTENANCE_MS = Number(process.env.IMMICH_DANBOORU_MAINTENANCE_HOURS || 12) * 3_600_000;
 
@@ -638,10 +639,16 @@ export class DanbooruService extends BaseService {
     const rows = await this.personRepository.getFacePersons(faceIds);
     const references = new Map<string, Float32Array[]>();
     const unassigned = new Map<string, string[]>();
+    // heads in an unnamed cluster may still be paired: a character pixai named on the image wins
+    const clustered = new Set<string>();
     for (const row of rows) {
       const entry = this.index.get(row.id)!;
-      if (!row.personGroupId) {
+      const unnamedCluster = !!row.personGroupId && !row.name && entry.source === 'cluster';
+      if (!row.personGroupId || unnamedCluster) {
         unassigned.set(entry.assetId, [...(unassigned.get(entry.assetId) ?? []), row.id]);
+        if (unnamedCluster) {
+          clustered.add(row.id);
+        }
       } else if (isReference(entry, row)) {
         references.set(row.personGroupId, [...(references.get(row.personGroupId) ?? []), entry.vector]);
       }
@@ -701,8 +708,11 @@ export class DanbooruService extends BaseService {
         stats.paired++;
       }
 
-      // 2. the rest: strict match against all characters not yet on this image
+      // 2. the rest: strict match against all characters not yet on this image (clustered heads stay put)
       for (const head of freeHeads) {
+        if (clustered.has(head)) {
+          continue;
+        }
         let best: { person: string; distance: number } | undefined;
         for (const [person, refs] of references) {
           if (present.has(person) || refs.length < 2) {
