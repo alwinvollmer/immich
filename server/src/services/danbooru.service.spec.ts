@@ -1,5 +1,5 @@
 // custom: Danbooru tagging (pixai-tagger-v1.0 + CCIP faces)
-import { readFile, readdir } from 'node:fs/promises';
+import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { SourceType } from 'src/enum.js';
 import {
   DANBOORU_MARKER_KEY,
@@ -165,6 +165,7 @@ describe(DanbooruService.name, () => {
         ownerId,
         personGroupId: 'p-new-1',
         name: 'hiyuki (wuthering waves)',
+        isHidden: true,
       });
       expect(faces[0].personGroupId).toBe('p-new-1');
     });
@@ -319,6 +320,40 @@ describe(DanbooruService.name, () => {
       for (const id of Object.keys(unknown)) {
         expect(mocks.person.reassignFace).toHaveBeenCalledWith(id, 'p-new-1');
       }
+    });
+  });
+
+  describe('auto-hide', () => {
+    it('hides every visible person with a single image on the first start', async () => {
+      vi.mocked(readFile).mockRejectedValue(new Error('ENOENT'));
+      mocks.person.getPeopleAssetCounts.mockResolvedValue([
+        { personGroupId: 'p-one', ownerId, isHidden: false, assets: 1 },
+        { personGroupId: 'p-two', ownerId, isHidden: false, assets: 2 },
+        { personGroupId: 'p-hidden-by-user', ownerId, isHidden: true, assets: 1 },
+      ]);
+
+      await sut.loadAutoHidden();
+
+      expect(mocks.person.update).toHaveBeenCalledExactlyOnceWith({ ownerId, personGroupId: 'p-one', isHidden: true });
+      expect(vi.mocked(writeFile)).toHaveBeenCalledWith(
+        expect.stringMatching(/danbooru-autohidden\.json$/),
+        JSON.stringify({ ids: ['p-one'] }),
+      );
+    });
+
+    it('shows auto-hidden people again once they have two images', async () => {
+      vi.mocked(readFile).mockResolvedValue(JSON.stringify({ ids: ['p-one', 'p-two', 'p-gone'] }) as never);
+      await sut.loadAutoHidden();
+      mocks.person.getPeopleAssetCounts.mockResolvedValue([
+        { personGroupId: 'p-one', ownerId, isHidden: true, assets: 1 },
+        { personGroupId: 'p-two', ownerId, isHidden: true, assets: 2 },
+      ]);
+
+      await sut.revealAutoHidden();
+
+      expect(mocks.person.getPeopleAssetCounts).toHaveBeenCalledWith(['p-one', 'p-two', 'p-gone']);
+      expect(mocks.person.update).toHaveBeenCalledExactlyOnceWith({ ownerId, personGroupId: 'p-two', isHidden: false });
+      expect(vi.mocked(writeFile)).toHaveBeenLastCalledWith(expect.anything(), JSON.stringify({ ids: ['p-one'] }));
     });
   });
 });

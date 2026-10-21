@@ -1022,4 +1022,22 @@ export class PersonRepository {
       .where('asset_face.assetDeletedAt', 'is', null)
       .execute();
   }
+
+  // custom: images per person (DanbooruService hides people with one image until a second one arrives)
+  async getPeopleAssetCounts(personGroupIds?: string[]) {
+    const rows = await this.db
+      .selectFrom('person')
+      .leftJoin('asset_face', (join) =>
+        join
+          .onRef('asset_face.personGroupId', '=', 'person.personGroupId')
+          .on('asset_face.deletedAt', 'is', null)
+          .on('asset_face.assetDeletedAt', 'is', null),
+      )
+      .select(['person.personGroupId', 'person.ownerId', 'person.isHidden'])
+      .select((eb) => eb.fn.count<string>('asset_face.assetId').distinct().as('assets'))
+      .$if(!!personGroupIds, (qb) => qb.where('person.personGroupId', '=', anyUuid(personGroupIds!)))
+      .groupBy(['person.personGroupId', 'person.ownerId', 'person.isHidden'])
+      .execute();
+    return rows.map((row) => ({ ...row, assets: Number(row.assets) }));
+  }
 }

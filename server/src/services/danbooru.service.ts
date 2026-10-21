@@ -35,6 +35,11 @@ import { upsertTags } from 'src/utils/tag.js';
  * maintenance pass runs: unassigned heads are paired with the whole-image faces of their image
  * (characters seen for the first time on a multi-character image), then matched against all
  * characters again (references grow), and the rest is clustered (CCIP OPTICS) into unnamed people.
+ *
+ * People with a single image are hidden (a group image alone can name hundreds of characters):
+ * once at startup for existing people, and every character the tagger creates starts hidden. They
+ * are kept in `<media>/custom/danbooru-autohidden.json` and shown again as soon as they have two
+ * images; people that are not on that list (hidden or shown by hand) are never touched.
  */
 const ENABLED = process.env.IMMICH_DANBOORU_ENABLED === '1';
 // The tagger is a plain-HTTP service on the Docker host. NOTE: `eslint --fix`
@@ -115,6 +120,7 @@ export class DanbooruService extends BaseService {
   private index = new Map<string, IndexEntry>();
   private names = new Map<string, Map<string, string>>();
   private lastMaintenance = 0;
+  private autoHidden = new Set<string>();
 
   @OnEvent({ name: 'AppBootstrap', workers: [ImmichWorker.Microservices] })
   async onBootstrap() {
@@ -122,6 +128,7 @@ export class DanbooruService extends BaseService {
       return;
     }
     await this.loadIndex();
+    await this.loadAutoHidden();
     this.logger.log(`Danbooru tagging on: ${TAGGER_URL}, ${this.scope()}, ${this.index.size} indexed faces`);
     this.running = this.loop();
   }
@@ -141,6 +148,68 @@ export class DanbooruService extends BaseService {
 
   private get indexFolder() {
     return join(StorageCore.getMediaLocation(), 'custom', 'ccip');
+  }
+
+  private get autoHiddenFile() {
+    return join(StorageCore.getMediaLocation(), 'custom', 'danbooru-autohidden.json');
+  }
+
+  /** the people this service hid; on the first start, hide every visible person with one image */
+  async loadAutoHidden() {
+    try {
+      const { ids } = JSON.parse(await readFile(this.autoHiddenFile, 'utf8')) as { ids: string[] };
+      this.autoHidden = new Set(ids);
+      return;
+    } catch {
+      // first start: no list yet
+    }
+    const people = await this.personRepository.getPeopleAssetCounts();
+    for (const { personGroupId, ownerId, isHidden, assets } of people) {
+      if (isHidden || assets !== 1) {
+        continue;
+      }
+
+      await this.personRepository.update({ ownerId, personGroupId, isHidden: true });
+      this.autoHidden.add(personGroupId);
+    }
+    await this.saveAutoHidden();
+    this.logger.log(`Danbooru: hid ${this.autoHidden.size} people with a single image`);
+  }
+
+  private async saveAutoHidden() {
+    await mkdir(join(StorageCore.getMediaLocation(), 'custom'), { recursive: true });
+    await writeFile(this.autoHiddenFile, JSON.stringify({ ids: [...this.autoHidden] }));
+  }
+
+  /** show auto-hidden people again once they have two images (deleted people leave the list) */
+  async revealAutoHidden() {
+    if (this.autoHidden.size === 0) {
+      return;
+    }
+    const people = await this.personRepository.getPeopleAssetCounts([...this.autoHidden]);
+    const existing = new Set(people.map(({ personGroupId }) => personGroupId));
+    let changed = false;
+    for (const id of this.autoHidden) {
+      if (existing.has(id)) {
+        continue;
+      }
+
+      this.autoHidden.delete(id);
+      changed = true;
+    }
+    for (const { personGroupId, ownerId, isHidden, assets } of people) {
+      if (assets < 2) {
+        continue;
+      }
+      if (isHidden) {
+        await this.personRepository.update({ ownerId, personGroupId, isHidden: false });
+      }
+      this.autoHidden.delete(personGroupId);
+      changed = true;
+    }
+    if (changed) {
+      await this.saveAutoHidden();
+    }
   }
 
   private async loadIndex() {
@@ -216,6 +285,9 @@ export class DanbooruService extends BaseService {
           this.failed.add(candidate.id);
         }
       }
+      await this.revealAutoHidden().catch((error) =>
+        this.logger.error(`Danbooru auto-hide check failed: ${this.describe(error)}`),
+      );
     }
   }
 
@@ -438,6 +510,7 @@ export class DanbooruService extends BaseService {
   }
 
   async maintenance() {
+    await this.revealAutoHidden();
     const owners = new Set(this.index.values().map(({ ownerId }) => ownerId));
     for (const ownerId of owners) {
       const stats = await this.maintainOwner(ownerId);
@@ -588,7 +661,10 @@ export class DanbooruService extends BaseService {
       return this.personFor(ownerId, name);
     }
     const group = await this.personRepository.createGroup(ownerId);
-    await this.personRepository.create({ ownerId, personGroupId: group.id, name });
+    // hidden until a second image shows the character (see revealAutoHidden)
+    await this.personRepository.create({ ownerId, personGroupId: group.id, name, isHidden: true });
+    this.autoHidden.add(group.id);
+    await this.saveAutoHidden();
     names.set(key, group.id);
     return group.id;
   }
