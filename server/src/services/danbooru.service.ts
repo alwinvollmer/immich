@@ -646,7 +646,8 @@ export class DanbooruService extends BaseService {
         references.set(row.personGroupId, [...(references.get(row.personGroupId) ?? []), entry.vector]);
       }
     }
-    // face changes per image, written to its marker and CCIP file at the end (null = face deleted)
+    await this.repairLostPairings(ownerId, rows);
+    // face changes per image, written to its marker and CCIP file (null = face deleted)
     const changes = new Map<string, Map<string, { person: string; source: FaceSource } | null>>();
     const change = (faceId: string, value: { person: string; source: FaceSource } | null, assetId?: string) => {
       const asset = assetId ?? this.index.get(faceId)!.assetId;
@@ -724,44 +725,114 @@ export class DanbooruService extends BaseService {
       }
     }
 
-    // 3. cluster what is left into unnamed people (new characters to name)
-    if (remaining.length >= CLUSTER_MIN) {
-      const response = await fetch(`${TAGGER_URL}/v2/cluster`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          embeddings: remaining.map((id) => [...this.index.get(id)!.vector]),
-          min_samples: CLUSTER_MIN,
-        }),
-      });
-      if (!response.ok) {
-        throw new Error(`tagger cluster HTTP ${response.status}: ${await response.text()}`);
-      }
-      const { labels } = (await response.json()) as { labels: number[] };
-      const clusters = new Map<number, string[]>();
-      for (const [i, label] of labels.entries()) {
-        if (label >= 0) {
-          clusters.set(label, [...(clusters.get(label) ?? []), remaining[i]]);
-        }
-      }
-      for (const members of clusters.values()) {
-        const group = await this.personRepository.createGroup(ownerId);
-        await this.personRepository.create({ ownerId, personGroupId: group.id, name: '' });
-        for (const id of members) {
-          await this.personRepository.reassignFace(id, group.id);
-          change(id, { person: group.id, source: 'cluster' });
-        }
-        affected.add(group.id);
-        stats.clusters++;
-        stats.clustered += members.length;
-      }
-    }
-    stats.left = remaining.length - stats.clustered;
+    // record pairing/matching now: the clustering below talks to the tagger and can fail
     for (const [assetId, faceChanges] of changes) {
       await this.recordChanges(assetId, ownerId, faceChanges);
     }
-    await this.refreshFeaturePhotos(ownerId, affected);
+    changes.clear();
+
+    // 3. cluster what is left into unnamed people (new characters to name)
+    try {
+      await this.clusterRemaining(ownerId, remaining, change, affected, stats);
+    } finally {
+      stats.left = remaining.length - stats.clustered;
+      for (const [assetId, faceChanges] of changes) {
+        await this.recordChanges(assetId, ownerId, faceChanges);
+      }
+      await this.refreshFeaturePhotos(ownerId, affected);
+    }
     return stats;
+  }
+
+  private async clusterRemaining(
+    ownerId: string,
+    remaining: string[],
+    change: (faceId: string, value: { person: string; source: FaceSource }) => void,
+    affected: Set<string>,
+    stats: { clustered: number; clusters: number },
+  ) {
+    if (!(remaining.length >= CLUSTER_MIN)) {
+      return;
+    }
+
+    const response = await fetch(`${TAGGER_URL}/v2/cluster`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        embeddings: remaining.map((id) => [...this.index.get(id)!.vector]),
+        min_samples: CLUSTER_MIN,
+      }),
+    });
+    if (!response.ok) {
+      throw new Error(`tagger cluster HTTP ${response.status}: ${await response.text()}`);
+    }
+    const { labels } = (await response.json()) as { labels: number[] };
+    const clusters = new Map<number, string[]>();
+    for (const [i, label] of labels.entries()) {
+      if (label >= 0) {
+        clusters.set(label, [...(clusters.get(label) ?? []), remaining[i]]);
+      }
+    }
+    for (const members of clusters.values()) {
+      const group = await this.personRepository.createGroup(ownerId);
+      await this.personRepository.create({ ownerId, personGroupId: group.id, name: '' });
+      for (const id of members) {
+        await this.personRepository.reassignFace(id, group.id);
+        change(id, { person: group.id, source: 'cluster' });
+      }
+      affected.add(group.id);
+      stats.clusters++;
+      stats.clustered += members.length;
+    }
+  }
+
+  /**
+   * a pairing whose marker update was lost (a maintenance pass that failed afterwards, 2026-10-21):
+   * a head recorded without a person now belongs to a character whose whole-image face on the same
+   * image is gone. Record it as pixai, and forget the whole-image face (the user did not delete it).
+   */
+  private async repairLostPairings(ownerId: string, rows: Array<{ id: string; personGroupId: string | null }>) {
+    const suspects = new Map<string, Array<{ id: string; person: string }>>();
+    for (const { id, personGroupId } of rows) {
+      const entry = this.index.get(id);
+      if (!entry || !personGroupId || entry.person || (entry.source && entry.source !== 'none')) {
+        continue;
+      }
+      suspects.set(entry.assetId, [...(suspects.get(entry.assetId) ?? []), { id, person: personGroupId }]);
+    }
+
+    let repaired = 0;
+    for (const [assetId, heads] of suspects) {
+      const row = await this.assetRepository.getMetadataByKey(assetId, DANBOORU_MARKER_KEY);
+      const marker = row?.value as Marker | undefined;
+      if (!marker?.faces) {
+        continue;
+      }
+      const faces = await this.personRepository.getFaces(assetId, { viewingUserId: ownerId });
+      const existing = new Set(faces.map(({ id }) => id));
+      const faceChanges = new Map<string, { person: string; source: FaceSource } | null>();
+      for (const head of heads) {
+        const whole = marker.faces.find(
+          (record) =>
+            record.source === 'whole' &&
+            record.person === head.person &&
+            !existing.has(record.id) &&
+            !faceChanges.has(record.id),
+        );
+        if (!whole) {
+          continue;
+        }
+        faceChanges.set(head.id, { person: head.person, source: 'pixai' });
+        faceChanges.set(whole.id, null);
+        repaired++;
+      }
+      if (faceChanges.size > 0) {
+        await this.recordChanges(assetId, ownerId, faceChanges);
+      }
+    }
+    if (repaired > 0) {
+      this.logger.log(`Danbooru maintenance: recorded ${repaired} pairings an interrupted pass had not written`);
+    }
   }
 
   /** apply maintenance changes to an image's marker and CCIP file (null = the face was deleted) */

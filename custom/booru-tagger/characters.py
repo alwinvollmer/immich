@@ -26,10 +26,19 @@ def heads_with_embeddings(image: Image.Image) -> list:
 
 
 def cluster(embeddings: list, min_samples: int) -> list:
-    """OPTICS clustering with CCIP's tuned eps (labels, -1 = noise)."""
-    from imgutils.metrics import ccip_clustering
+    """OPTICS clustering with CCIP's default parameters (labels, -1 = noise).
 
-    feats = [np.asarray(e, dtype=np.float32) for e in embeddings]
-    if len(feats) < max(2, min_samples):
-        return [-1] * len(feats)
-    return [int(v) for v in ccip_clustering(feats, method="optics", min_samples=min_samples)]
+    Same as imgutils' ccip_clustering(method="optics"), but on a precomputed distance matrix:
+    imgutils hands OPTICS a Python callback (~36 M calls for 6,000 heads, far beyond the server's
+    5-minute request timeout). CCIP's difference metric is exactly half the cosine distance
+    (verified 2026-10-20), so the matrix is one matrix product.
+    """
+    from sklearn.cluster import OPTICS
+
+    x = np.asarray(embeddings, dtype=np.float32)
+    if len(x) < max(2, min_samples):
+        return [-1] * len(x)
+    x = x / np.linalg.norm(x, axis=1, keepdims=True)
+    diff = np.clip(0.5 * (1.0 - x @ x.T), 0.0, None)
+    np.fill_diagonal(diff, 0.0)
+    return [int(v) for v in OPTICS(max_eps=0.5, min_samples=min_samples, metric="precomputed").fit(diff).labels_]

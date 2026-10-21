@@ -447,6 +447,86 @@ describe(DanbooruService.name, () => {
     });
   });
 
+  describe('interrupted maintenance', () => {
+    it('records the pairing even when the clustering fails', async () => {
+      const unknown = Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`u${i}`, axis(6, i * 0.01)]));
+      await loadIndex(sut, {
+        refs: {
+          assetId: 'refs',
+          faces: { r1: axis(0), r2: axis(0, 0.05) },
+          records: { r1: { person: 'p-megumin', source: 'pixai' }, r2: { person: 'p-megumin', source: 'pixai' } },
+        },
+        multi: { assetId: 'multi', faces: { h1: axis(0, 0.02) } },
+        unknown: { assetId: 'unknown', faces: unknown },
+      });
+      mocks.person.getFacePersons.mockResolvedValue([
+        { id: 'r1', personGroupId: 'p-megumin', ownerId, name: 'megumin' },
+        { id: 'r2', personGroupId: 'p-megumin', ownerId, name: 'megumin' },
+        { id: 'h1', personGroupId: null, ownerId, name: null },
+        ...Object.keys(unknown).map((id) => ({ id, personGroupId: null, ownerId, name: null })),
+      ]);
+      mocks.person.getFaces.mockImplementation((assetId) =>
+        Promise.resolve((assetId === 'multi' ? [wholeImageFace('w-megumin', 'p-megumin')] : []) as never),
+      );
+      mocks.asset.getMetadataByKey.mockResolvedValue({
+        value: {
+          model: 'pixai-tagger-v1.0',
+          at: '',
+          tagIds: [],
+          faceIds: ['h1', 'w-megumin'],
+          faces: [
+            { id: 'h1', person: null, source: 'none', box: [1, 1, 9, 9] },
+            { id: 'w-megumin', person: 'p-megumin', source: 'whole', box: [0, 0, 1000, 800] },
+          ],
+        },
+      } as never);
+      vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('fetch failed')));
+
+      await expect(sut.maintenance()).rejects.toThrow('fetch failed');
+
+      expect(mocks.asset.upsertMetadata).toHaveBeenCalledWith('multi', [
+        expect.objectContaining({
+          value: expect.objectContaining({
+            faces: [{ id: 'h1', person: 'p-megumin', source: 'pixai', box: [1, 1, 9, 9] }],
+          }),
+        }),
+      ]);
+    });
+
+    it('records pairings an interrupted pass did not write', async () => {
+      await loadIndex(sut, {
+        multi: { assetId: 'multi', faces: { h1: axis(0) }, records: { h1: { person: null, source: 'none' } as never } },
+      });
+      mocks.person.getFacePersons.mockResolvedValue([
+        { id: 'h1', personGroupId: 'p-megumin', ownerId, name: 'megumin' },
+      ]);
+      mocks.person.getFaces.mockResolvedValue([]);
+      mocks.asset.getMetadataByKey.mockResolvedValue({
+        value: {
+          model: 'pixai-tagger-v1.0',
+          at: '',
+          tagIds: [],
+          faceIds: ['h1', 'w-gone'],
+          faces: [
+            { id: 'h1', person: null, source: 'none', box: [1, 1, 9, 9] },
+            { id: 'w-gone', person: 'p-megumin', source: 'whole', box: [0, 0, 1000, 800] },
+          ],
+        },
+      } as never);
+
+      await sut.maintenance();
+
+      expect(mocks.asset.upsertMetadata).toHaveBeenCalledWith('multi', [
+        expect.objectContaining({
+          value: expect.objectContaining({
+            faceIds: ['h1'],
+            faces: [{ id: 'h1', person: 'p-megumin', source: 'pixai', box: [1, 1, 9, 9] }],
+          }),
+        }),
+      ]);
+    });
+  });
+
   describe('references', () => {
     it('never learns from CCIP fallback matches', async () => {
       await loadIndex(sut, {
