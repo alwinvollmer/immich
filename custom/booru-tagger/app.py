@@ -1,10 +1,11 @@
 """Anime tagger service — FastAPI + ONNX Runtime.
 
 v2 (used by the Immich fork):
-  POST /v2/analyze  multipart: image=<file>, thresholds=<json, optional>
+  POST /v2/analyze  multipart: image=<file>, thresholds=<json, optional>, heads=<1|0, optional>
         -> {"model", "width", "height", "tags": {general, character, copyright, rating},
             "heads": [{"box": [x1, y1, x2, y2], "score", "ccip": [768 floats]}]}
-        pixai-tagger-v1.0 + anime head detection + CCIP character embeddings.
+        pixai-tagger-v1.0 + anime head detection + CCIP character embeddings
+        (heads=0 skips head detection + CCIP: the server reuses heads it stored before).
   POST /v2/cluster  {"embeddings": [[...]], "min_samples": 3} -> {"labels": [...]}
   GET  /v2/info     -> model name, default thresholds, device
 
@@ -82,7 +83,7 @@ def _open_image(data: bytes) -> Image.Image:
 
 
 @app.post("/v2/analyze")
-def analyze(image: UploadFile = File(...), thresholds: str = Form("{}")):
+def analyze(image: UploadFile = File(...), thresholds: str = Form("{}"), heads: str = Form("1")):
     import characters
 
     img = _open_image(image.file.read())
@@ -94,18 +95,18 @@ def analyze(image: UploadFile = File(...), thresholds: str = Form("{}")):
         started = time.time()
         try:
             tags = _v2["tagger"].predict(img, thr)
-            rgb = img.convert("RGB")
-            heads = characters.heads_with_embeddings(rgb)
+            found = characters.heads_with_embeddings(img.convert("RGB")) if heads != "0" else []
         except Exception as e:
             log.exception("v2 analyze error")
             raise HTTPException(status_code=500, detail=str(e))
     log.info(
         f"v2: {len(tags['general'])} general, characters {list(tags['character'])}, "
-        f"copyright {list(tags['copyright'])}, {len(heads)} heads, {time.time() - started:.1f}s"
+        f"copyright {list(tags['copyright'])}, {len(found) if heads != '0' else 'no'} heads, "
+        f"{time.time() - started:.1f}s"
     )
     from pixai10 import MODEL_NAME
 
-    return {"model": MODEL_NAME, "width": img.width, "height": img.height, "tags": tags, "heads": heads}
+    return {"model": MODEL_NAME, "width": img.width, "height": img.height, "tags": tags, "heads": found}
 
 
 class ClusterRequest(BaseModel):

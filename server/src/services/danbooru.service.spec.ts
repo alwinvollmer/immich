@@ -316,6 +316,44 @@ describe(DanbooruService.name, () => {
       ]);
     });
 
+    it('re-runs only the faces, reusing the stored heads, for a faces-only marker', async () => {
+      await loadIndex(sut, { stored: { assetId: 'asset-1', faces: { 'old-head': axis(0) } } });
+      mocks.asset.getMetadataByKey.mockResolvedValue({
+        value: { model: 'recheck-faces', at: '', tagIds: ['t-old'], faceIds: ['old-head'] },
+      } as never);
+      mocks.person.getFaces.mockResolvedValue([
+        {
+          id: 'old-head',
+          personGroupId: 'p-tifa',
+          sourceType: SourceType.Manual,
+          imageWidth: 1000,
+          imageHeight: 800,
+          boundingBoxX1: 10,
+          boundingBoxY1: 20,
+          boundingBoxX2: 110,
+          boundingBoxY2: 120,
+        },
+      ] as never);
+      const fetchMock = vi.mocked(fetch);
+
+      await sut.processAsset(candidate);
+
+      const form = fetchMock.mock.calls.at(-1)![1]!.body as FormData;
+      expect(form.get('heads')).toBe('0');
+      expect(mocks.tag.replaceAssetTags).not.toHaveBeenCalled();
+      expect(mocks.asset.upsertExif).not.toHaveBeenCalled();
+      expect(mocks.person.deleteAssetFace).toHaveBeenCalledWith('old-head');
+      expect(mocks.person.createAssetFace).toHaveBeenCalledWith(
+        expect.objectContaining({ personGroupId: 'p-megumin', boundingBoxX1: 10, boundingBoxY2: 120 }),
+      );
+      expect(mocks.asset.upsertMetadata).toHaveBeenCalledWith('asset-1', [
+        {
+          key: DANBOORU_MARKER_KEY,
+          value: expect.objectContaining({ model: 'pixai-tagger-v1.0', tagIds: ['t-old'] }),
+        },
+      ]);
+    });
+
     it('does not recreate a face the user deleted', async () => {
       mocks.asset.getMetadataByKey.mockResolvedValue({
         value: {

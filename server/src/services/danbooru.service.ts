@@ -61,6 +61,9 @@ const CLUSTER_MIN = Number(process.env.IMMICH_DANBOORU_CLUSTER_MIN || 5);
 const MAINTENANCE_MS = Number(process.env.IMMICH_DANBOORU_MAINTENANCE_HOURS || 12) * 3_600_000;
 
 export const DANBOORU_MARKER_KEY = 'custom.danbooru';
+// a marker with this model re-runs only the face assignment: pixai names the characters again, the
+// heads and CCIP vectors stored before are reused, and tags/description stay as they are
+export const FACES_ONLY_MODEL = 'recheck-faces';
 const SENTINEL_TAG = 'danbooru';
 const SERIES_PREFIX = '::series:';
 const BATCH_SIZE = 20;
@@ -367,10 +370,11 @@ export class DanbooruService extends BaseService {
     return info.model;
   }
 
-  private async analyze(image: Buffer): Promise<TaggerResult> {
+  private async analyze(image: Buffer, heads = true): Promise<TaggerResult> {
     const form = new FormData();
     form.append('image', new Blob([new Uint8Array(image)]), 'preview');
     form.append('thresholds', THRESHOLDS);
+    form.append('heads', heads ? '1' : '0');
     const response = await fetch(`${TAGGER_URL}/v2/analyze`, { method: 'POST', body: form });
     if (!response.ok) {
       throw new Error(`tagger HTTP ${response.status}: ${await response.text()}`);
@@ -379,11 +383,16 @@ export class DanbooruService extends BaseService {
   }
 
   async processAsset({ id: assetId, ownerId, previewPath }: Candidate) {
-    const result = await this.analyze(await this.storageRepository.readFile(previewPath));
     const previousRow = await this.assetRepository.getMetadataByKey(assetId, DANBOORU_MARKER_KEY);
     const previous = previousRow?.value as Marker | undefined;
+    const facesOnly = previous?.model === FACES_ONLY_MODEL;
 
-    const tagIds = await this.applyTags(assetId, ownerId, result, previous);
+    const result = await this.analyze(await this.storageRepository.readFile(previewPath), !facesOnly);
+    if (facesOnly) {
+      result.heads = await this.storedHeads(assetId, ownerId);
+    }
+
+    const tagIds = facesOnly ? previous.tagIds : await this.applyTags(assetId, ownerId, result, previous);
     const { faces, removed } = await this.applyFaces(assetId, ownerId, result, previous);
 
     const marker: Marker = {
@@ -399,6 +408,19 @@ export class DanbooruService extends BaseService {
       `Danbooru ${assetId}: ${tagIds.length} tags, characters [${Object.keys(result.tags.character).join(', ')}], ` +
         `${result.heads.length} heads`,
     );
+  }
+
+  /** heads detected in an earlier run (box + CCIP vector), reused by a faces-only re-run */
+  private async storedHeads(assetId: string, ownerId: string): Promise<TaggerHead[]> {
+    const faces = await this.personRepository.getFaces(assetId, { viewingUserId: ownerId });
+    return faces.flatMap((face) => {
+      const entry = this.index.get(face.id);
+      if (!entry) {
+        return [];
+      }
+      const box: Box = [face.boundingBoxX1, face.boundingBoxY1, face.boundingBoxX2, face.boundingBoxY2];
+      return [{ box, score: 1, ccip: [...entry.vector] }];
+    });
   }
 
   private async applyTags(assetId: string, ownerId: string, result: TaggerResult, previous?: Marker) {
