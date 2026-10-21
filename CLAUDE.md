@@ -73,7 +73,8 @@ merging a new upstream release. Back to stock = point `IMMICH_SERVER_IMAGE` at
 ## nieke / data rules
 
 - API: `http://192.168.1.249:2283/api`, key = `IMMICH_API_KEY` in
-  `C:\docker\immich-api-worker\.env` (read it per command; scratch files get wiped).
+  `C:\temp\claude-immich\retired\immich-api-worker\.env` (the retired worker's folder, moved out of
+  `C:\docker` 2026-10-21; read it per command; scratch files get wiped).
 - DB: write SQL to a file, `scp` to `C:\temp\claude-immich\`, `docker cp` into `immich_postgres`,
   `psql -f` (inline quoting through cmd.exe is fragile).
 - Everything we generate on nieke goes to `C:\temp\claude-immich\` — never into `C:\docker\`.
@@ -92,8 +93,9 @@ merging a new upstream release. Back to stock = point `IMMICH_SERVER_IMAGE` at
   ⚠️ Docker Desktop's build proxy on nieke returns 502 for Fastly hosts (PyPI, deb.debian.org):
   build with `--build-arg HTTP_PROXY= --build-arg HTTPS_PROXY= --build-arg http_proxy= --build-arg https_proxy=`.
   deb.debian.org is unreachable from containers at all → images are Ubuntu-based.
-- `C:\docker\immich-api-worker` (port 7086): RETIRED 2026-10-21 (container stopped, workflow
-  "Danbooru auto-tag (webhook)" disabled; backup C:\temp\claude-immich\workflow-danbooru-autotag-2026-10-21.json).
+- immich-api-worker: RETIRED and removed 2026-10-21 (compose down, image removed, workflow
+  "Danbooru auto-tag (webhook)" deleted — backup C:\temp\claude-immich\workflow-danbooru-autotag-2026-10-21.json;
+  folder moved to C:\temp\claude-immich\retired\immich-api-worker).
 - anime-upscaler (:7085, CPU mode) stays separate.
   anime-upscaler (`C:\docker\anime-upscaler\main.py`, bind-mounted → `docker compose restart`) has a
   job API: `POST /jobs` (image, outscale) → id; `GET /jobs/{id}` (state, progress, tilesDone/Total,

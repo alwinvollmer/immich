@@ -54,10 +54,10 @@ an optional album; 5 albums in the sidebar; archiving workaround removed.
    heads of multi-character images later). A marker per image (`custom.danbooru` in asset_metadata)
    names the model, so a new model remaps the library by itself. Immich's own face detection runs
    only on camera photos (`IMMICH_FACES_CAMERA_ONLY=1`, EXIF make). 19 People renamed to the new
-   Danbooru names. Forced remap of all 11,376 images on the GPU tagger. The immich-api-worker and
-   its "Danbooru auto-tag" workflow are off (stopped/disabled; delete after the remap).
-   Open: decide about People with one image; ML junk-face cleanup (3,359 faces on images without
-   EXIF make, list in C:\temp\claude-immich\junk-ml-faces-2026-10-21.csv) then `minFaces` back to 3.
+   Danbooru names. Forced remap of all 11,375 images on the GPU tagger (maintenance: 258 heads
+   paired, 695 matched later, 50 new unnamed people). immich-api-worker + its workflow removed;
+   3,359 Immich ML junk faces on non-camera images deleted, `minFaces` back to 3; 296 empty
+   People deleted. Open: decide about People with one image (1,033 named).
 5. **Mobile app (later)** — own APK via Obtainium: point /api/server/apk-links
    (server.service.ts) at this fork's releases.
 
