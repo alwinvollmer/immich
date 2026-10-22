@@ -1,7 +1,7 @@
 // custom: where a person on an image came from (DanbooruService records it in the `custom.danbooru` marker)
 import { getAssetMetadataByKey, SourceType, type AssetFaceResponseDto } from '@immich/sdk';
 
-export type FaceRecord = { id: string; person: string | null; source: string };
+export type FaceRecord = { id: string; person: string | null; source: string; confirmed?: boolean };
 
 const labels: Record<string, string> = {
   pixai: 'pixai',
@@ -41,7 +41,12 @@ export const faceSourceLabel = (
       }
       continue;
     }
-    found.add(record.person === personId ? (labels[record.source] ?? record.source) : labels.manual);
+    if (record.person !== personId) {
+      found.add(labels.manual);
+      continue;
+    }
+    // region pixai saw the character on this very head
+    found.add(record.confirmed ? 'pixai ✓' : (labels[record.source] ?? record.source));
   }
   return found.size > 0 ? [...found].join(', ') : undefined;
 };

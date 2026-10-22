@@ -11,6 +11,12 @@ describe('faceSourceLabel', () => {
     expect(faceSourceLabel([face('f1')], records({ id: 'f1', person: 'p1', source: 'ccip' }), 'p1')).toBe('CCIP match');
   });
 
+  it('marks pixai faces whose head region confirmed the character', () => {
+    expect(
+      faceSourceLabel([face('f1')], records({ id: 'f1', person: 'p1', source: 'pixai', confirmed: true }), 'p1'),
+    ).toBe('pixai ✓');
+  });
+
   it('calls a face manual when its person was changed by hand or it was added by hand', () => {
     expect(faceSourceLabel([face('f1')], records({ id: 'f1', person: 'p1', source: 'pixai' }), 'p2')).toBe('manual');
     expect(faceSourceLabel([face('f9')], records({ id: 'f1', person: 'p1', source: 'pixai' }), 'p2')).toBe('manual');

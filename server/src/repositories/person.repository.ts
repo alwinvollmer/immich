@@ -1045,4 +1045,27 @@ export class PersonRepository {
       .execute();
     return rows.map((row) => ({ ...row, assets: Number(row.assets) }));
   }
+
+  // custom: people that pixai named (DanbooruService): any of their faces is recorded as a pixai or
+  // whole-image face in a `custom.danbooru` marker. The CCIP fallback never adds faces to them.
+  async getDanbooruPixaiPeople(): Promise<Set<string>> {
+    const rows = await this.db
+      .selectFrom('asset_metadata')
+      .innerJoin(
+        sql<{
+          id: string;
+          source: string;
+        }>`jsonb_to_recordset(asset_metadata.value->'faces') as r(id text, source text)`.as('r'),
+        (join) => join.onTrue(),
+      )
+      .innerJoin('asset_face', (join) => join.on(sql`asset_face.id::text`, '=', sql.ref('r.id')))
+      .select('asset_face.personGroupId')
+      .distinct()
+      .where('asset_metadata.key', '=', 'custom.danbooru')
+      .where('r.source', 'in', ['pixai', 'whole'])
+      .where('asset_face.personGroupId', 'is not', null)
+      .where('asset_face.deletedAt', 'is', null)
+      .execute();
+    return new Set(rows.map(({ personGroupId }) => personGroupId!));
+  }
 }

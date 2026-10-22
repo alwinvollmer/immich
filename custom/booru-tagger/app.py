@@ -1,11 +1,14 @@
 """Anime tagger service — FastAPI + ONNX Runtime.
 
 v2 (used by the Immich fork):
-  POST /v2/analyze  multipart: image=<file>, thresholds=<json, optional>, heads=<1|0, optional>
+  POST /v2/analyze  multipart: image=<file>, thresholds=<json, optional>, heads=<1|0, optional>,
+                    regions=<1|0, optional>, boxes=<json, optional>
         -> {"model", "width", "height", "tags": {general, character, copyright, rating},
             "heads": [{"box": [x1, y1, x2, y2], "score", "ccip": [768 floats]}]}
         pixai-tagger-v1.0 + anime head detection + CCIP character embeddings
-        (heads=0 skips head detection + CCIP: the server reuses heads it stored before).
+        (heads=0 skips head detection + CCIP: the server reuses heads it stored before and may pass
+        their boxes; regions=1 adds pixai's character scores per head region when the image has a
+        pixai character: heads[i].character = {tag: score})
   POST /v2/regions  multipart: image=<file>, boxes=<json [[x1, y1, x2, y2], ...]>, floor=<float, default 0.05>
         -> {"regions": [{"box": [...], "character": {tag: score}}]}: pixai on each head region, enlarged
         to head + upper body (characters are recognised from hair, clothes and accessories too)
@@ -86,26 +89,37 @@ def _open_image(data: bytes) -> Image.Image:
 
 
 @app.post("/v2/analyze")
-def analyze(image: UploadFile = File(...), thresholds: str = Form("{}"), heads: str = Form("1")):
+def analyze(
+    image: UploadFile = File(...),
+    thresholds: str = Form("{}"),
+    heads: str = Form("1"),
+    regions: str = Form("0"),
+    boxes: str = Form(""),
+):
     import characters
 
     img = _open_image(image.file.read())
     try:
         thr = json.loads(thresholds or "{}")
+        given = json.loads(boxes) if boxes else []
     except ValueError:
-        raise HTTPException(status_code=400, detail="thresholds must be JSON")
+        raise HTTPException(status_code=400, detail="thresholds and boxes must be JSON")
     with _v2_lock:
         started = time.time()
         try:
             tags = _v2["tagger"].predict(img, thr)
-            found = characters.heads_with_embeddings(img.convert("RGB")) if heads != "0" else []
+            rgb = img.convert("RGB")
+            found = characters.heads_with_embeddings(rgb) if heads != "0" else [{"box": box} for box in given]
+            if regions == "1" and tags["character"]:
+                for head in found:
+                    head["character"] = _region_scores(rgb, head["box"])
         except Exception as e:
             log.exception("v2 analyze error")
             raise HTTPException(status_code=500, detail=str(e))
     log.info(
         f"v2: {len(tags['general'])} general, characters {list(tags['character'])}, "
-        f"copyright {list(tags['copyright'])}, {len(found) if heads != '0' else 'no'} heads, "
-        f"{time.time() - started:.1f}s"
+        f"copyright {list(tags['copyright'])}, {len(found)} heads ({'detected' if heads != '0' else 'given'}"
+        f"{', regions' if regions == '1' and tags['character'] else ''}), {time.time() - started:.1f}s"
     )
     from pixai10 import MODEL_NAME
 
@@ -125,6 +139,12 @@ def _region(box: list, width: int, height: int) -> tuple:
     )
 
 
+def _region_scores(rgb: Image.Image, box: list, floor: float = 0.05) -> dict:
+    """pixai's character scores on a head region (characters are recognised from hair, clothes too)"""
+    crop = rgb.crop(_region(box, rgb.width, rgb.height))
+    return _v2["tagger"].predict(crop, {"character": floor, "general": 1.01, "copyright": 1.01})["character"]
+
+
 @app.post("/v2/regions")
 def regions(image: UploadFile = File(...), boxes: str = Form(...), floor: float = Form(0.05)):
     img = _open_image(image.file.read()).convert("RGB")
@@ -136,9 +156,7 @@ def regions(image: UploadFile = File(...), boxes: str = Form(...), floor: float 
     with _v2_lock:
         started = time.time()
         for box in box_list:
-            crop = img.crop(_region(box, img.width, img.height))
-            tags = _v2["tagger"].predict(crop, {"character": floor, "general": 1.01, "copyright": 1.01})
-            out.append({"box": box, "character": tags["character"]})
+            out.append({"box": box, "character": _region_scores(img, box, floor)})
     log.info(f"v2 regions: {len(box_list)} boxes, {time.time() - started:.1f}s")
     return {"regions": out}
 

@@ -53,8 +53,21 @@ const ALBUM_NAMES = (process.env.IMMICH_DANBOORU_ALBUMS ?? 'Download,Reddit,9GAG
 // images in no album are tagged too (set to 0 to test on one album only)
 const INCLUDE_UNSORTED = process.env.IMMICH_DANBOORU_INCLUDE_UNSORTED !== '0';
 const THRESHOLDS = process.env.IMMICH_DANBOORU_THRESHOLDS || '{}';
-// cosine distance; mean of a character's 3 closest references (CCIP test: ~95 % correct, ~65 % assigned)
-const MATCH_DISTANCE = Number(process.env.IMMICH_DANBOORU_MATCH_DISTANCE || 0.21);
+// CCIP fallback for heads pixai did not name — only into people pixai does not know (groups, people
+// made by hand), never into pixai characters. Calibrated 2026-10-22 on 6,967 pixai heads + 4,007 heads
+// on images without a pixai character: mean of the 3 closest references <= 0.14, >= 0.06 ahead of the
+// second-best person, >= 3 references, head >= 64 px -> ~40 % found, 0.7 % wrong, 0.9 % of non-characters
+// assigned (the old 0.21 without a gap assigned 22 % of non-characters and snowballed).
+const MATCH_DISTANCE = Number(process.env.IMMICH_DANBOORU_MATCH_DISTANCE ?? 0.14);
+const FALLBACK_GAP = Number(process.env.IMMICH_DANBOORU_FALLBACK_GAP ?? 0.06);
+const FALLBACK_MIN_REFS = Number(process.env.IMMICH_DANBOORU_FALLBACK_MIN_REFS ?? 3);
+// heads smaller than this (short side, preview pixels) give unreliable CCIP vectors (crowds, background)
+const MIN_HEAD = Number(process.env.IMMICH_DANBOORU_MIN_HEAD ?? 64);
+// region pixai: pixai on head + upper body; a clear winner among the image's pixai characters
+// (score and lead over the second) names the head (hand check 2026-10-22: right ~13 of 14 times
+// where it disagreed with the old CCIP pairing)
+const REGION_SCORE = Number(process.env.IMMICH_DANBOORU_REGION_SCORE ?? 0.27);
+const REGION_GAP = Number(process.env.IMMICH_DANBOORU_REGION_GAP ?? 0.2);
 // a head on an image whose characters pixai named only needs to be closer to one of them than this
 // (independent of the fallback: pixai already said the character is on the image)
 const PAIR_DISTANCE = Number(process.env.IMMICH_DANBOORU_PAIR_DISTANCE || 0.42);
@@ -71,7 +84,13 @@ const BATCH_SIZE = 20;
 const IDLE_MS = 30_000;
 const TAGGER_DOWN_MS = 60_000;
 
-type TaggerHead = { box: [number, number, number, number]; score: number; ccip: number[] };
+type TaggerHead = {
+  box: [number, number, number, number];
+  score?: number;
+  ccip?: number[];
+  // pixai's character scores on the head region (regions=1)
+  character?: Record<string, number>;
+};
 export type TaggerResult = {
   model: string;
   width: number;
@@ -86,7 +105,14 @@ type Box = [number, number, number, number];
  * Immich (`manual`), or no person (`none`)
  */
 export type FaceSource = 'pixai' | 'whole' | 'ccip' | 'cluster' | 'manual' | 'none';
-export type FaceRecord = { id: string; person: string | null; source: FaceSource; box: Box };
+export type FaceRecord = {
+  id: string;
+  person: string | null;
+  source: FaceSource;
+  box: Box;
+  // region pixai saw the person's character on this head
+  confirmed?: boolean;
+};
 type Marker = {
   model: string;
   at: string;
@@ -95,6 +121,8 @@ type Marker = {
   faces?: FaceRecord[];
   // boxes of faces the user deleted: never recreated
   removed?: Box[];
+  // pixai's characters on the whole image with their scores
+  characters?: Record<string, number>;
 };
 type IndexEntry = {
   assetId: string;
@@ -102,10 +130,23 @@ type IndexEntry = {
   vector: Float32Array;
   person?: string | null;
   source?: FaceSource;
+  confirmed?: boolean;
+  regions?: Record<string, number>;
+  size?: number;
 };
 type Candidate = { id: string; ownerId: string; previewPath: string };
 type FaceBox = { x1: number; y1: number; x2: number; y2: number };
-type NewFace = { box: FaceBox; personGroupId: string | null; source: FaceSource; vector?: Float32Array };
+type NewFace = {
+  box: FaceBox;
+  personGroupId: string | null;
+  source: FaceSource;
+  vector?: Float32Array;
+  confirmed?: boolean;
+  regions?: Record<string, number>;
+};
+type FaceChange = { person: string; source: FaceSource; confirmed?: boolean };
+/** CCIP references: for pairing heads with pixai characters, and for the fallback into other people */
+export type References = { pair: Map<string, Float32Array[]>; fallback: Map<string, Float32Array[]> };
 
 const normalize = (values: number[]) => {
   const vector = Float32Array.from(values);
@@ -148,22 +189,101 @@ const overlap = (a: Box, b: Box) => {
   return union > 0 ? (w * h) / union : 0;
 };
 
+const boxSize = (box: Box | FaceBox) =>
+  Array.isArray(box) ? Math.min(box[2] - box[0], box[3] - box[1]) : Math.min(box.x2 - box.x1, box.y2 - box.y1);
+
+const tagKey = (name: string) => name.replaceAll('_', ' ').toLowerCase();
+
+/** best and second-best region score among these character names (lower case, spaces) */
+const regionRanking = (regions: Record<string, number> | undefined, names: string[]) => {
+  const scores = new Map(Object.entries(regions ?? {}).map(([tag, score]) => [tagKey(tag), score]));
+  const ranked = names.map((name) => ({ name, score: scores.get(name) ?? 0 })).sort((a, b) => b.score - a.score);
+  return { best: ranked[0], second: ranked[1]?.score ?? 0 };
+};
+
+/** a clear region winner: score and lead over the second-best character */
+const regionWinner = (regions: Record<string, number> | undefined, names: string[]) => {
+  if (!regions || names.length === 0) {
+    return;
+  }
+  const { best, second } = regionRanking(regions, names);
+  return best.score >= REGION_SCORE && best.score - second >= REGION_GAP ? best : undefined;
+};
+
 /**
- * a face teaches the matching only when its person is trustworthy: named by pixai, set by hand
- * (also: its person differs from the one this service recorded), or a cluster the user named.
- * CCIP fallback matches never become references (they snowballed: ~730 heads ended up as Tifa).
+ * a face teaches the pairing with pixai characters only when its person is trustworthy: a head region
+ * pixai confirmed, set by hand (also: its person differs from the one this service recorded), or a
+ * group the user named. CCIP fallback matches never teach anything (they snowballed: ~730 heads became
+ * Tifa), and neither do unconfirmed pixai heads (a glove as "2B", "Mikasa" on Sasha's head).
  */
 export const isReference = (entry: IndexEntry, person: { personGroupId: string | null; name: string | null }) => {
-  if (!person.personGroupId) {
+  if (!person.personGroupId || (entry.size !== undefined && entry.size < MIN_HEAD)) {
     return false;
   }
   if (entry.person !== undefined && entry.person !== person.personGroupId) {
     return true;
   }
-  if (entry.source === 'pixai' || entry.source === 'manual') {
+  if (entry.source === 'manual') {
     return true;
   }
+  if (entry.source === 'pixai') {
+    return entry.confirmed === true;
+  }
   return entry.source === 'cluster' && !!person.name;
+};
+
+/** a face teaches the fallback into people pixai does not know: their group and hand-made faces */
+export const isFallbackReference = (
+  entry: IndexEntry,
+  person: { personGroupId: string | null },
+  pixaiPeople: Set<string>,
+) => {
+  if (!person.personGroupId || pixaiPeople.has(person.personGroupId)) {
+    return false;
+  }
+  if (entry.size !== undefined && entry.size < MIN_HEAD) {
+    return false;
+  }
+  const changedByHand = entry.person !== undefined && entry.person !== person.personGroupId;
+  return changedByHand || entry.source === 'cluster' || entry.source === 'manual';
+};
+
+/**
+ * the fallback for a head pixai did not name: the closest person among the fallback targets, if it is
+ * close enough, clearly ahead of every other known person, has enough references and the head is big
+ */
+export const fallbackMatch = (vector: Float32Array, size: number, references: References, exclude: Set<string>) => {
+  if (MATCH_DISTANCE <= 0 || size < MIN_HEAD) {
+    return;
+  }
+  let best: { person: string; distance: number } | undefined;
+  let second = Infinity;
+  const consider = (person: string, refs: Float32Array[], target: boolean) => {
+    if (exclude.has(person) || refs.length === 0) {
+      return;
+    }
+    const distance = distanceToReferences(vector, refs);
+    if (target && refs.length >= FALLBACK_MIN_REFS && (!best || distance < best.distance)) {
+      if (best) {
+        second = Math.min(second, best.distance);
+      }
+      best = { person, distance };
+    } else {
+      second = Math.min(second, distance);
+    }
+  };
+  for (const [person, refs] of references.fallback) {
+    consider(person, refs, true);
+  }
+  for (const [person, refs] of references.pair) {
+    if (!references.fallback.has(person)) {
+      consider(person, refs, false);
+    }
+  }
+  if (!best || best.distance > MATCH_DISTANCE || second - best.distance < FALLBACK_GAP) {
+    return;
+  }
+  return best;
 };
 
 @Injectable()
@@ -175,6 +295,7 @@ export class DanbooruService extends BaseService {
   private names = new Map<string, Map<string, string>>();
   private lastMaintenance = 0;
   private autoHidden = new Set<string>();
+  private pixaiPeople = new Set<string>();
 
   @OnEvent({ name: 'AppBootstrap', workers: [ImmichWorker.Microservices] })
   async onBootstrap() {
@@ -279,7 +400,16 @@ export class DanbooruService extends BaseService {
           assetId: string;
           ownerId: string;
           faces: Record<string, number[]>;
-          records?: Record<string, { person: string | null; source: FaceSource }>;
+          records?: Record<
+            string,
+            {
+              person: string | null;
+              source: FaceSource;
+              confirmed?: boolean;
+              regions?: Record<string, number>;
+              size?: number;
+            }
+          >;
         };
         for (const [faceId, values] of Object.entries(faces)) {
           const record = records?.[faceId];
@@ -304,6 +434,9 @@ export class DanbooruService extends BaseService {
           limit: BATCH_SIZE + this.failed.size,
         });
         candidates = rows.filter(({ id }) => !this.failed.has(id));
+        if (candidates.length > 0) {
+          this.pixaiPeople = await this.personRepository.getDanbooruPixaiPeople();
+        }
       } catch (error) {
         this.logger.warn(`Danbooru tagging paused, tagger unavailable: ${this.describe(error)}`);
         await this.pause(TAGGER_DOWN_MS);
@@ -371,11 +504,14 @@ export class DanbooruService extends BaseService {
     return info.model;
   }
 
-  private async analyze(image: Buffer, heads = true): Promise<TaggerResult> {
+  private async analyze(image: Buffer, boxes?: Box[]): Promise<TaggerResult> {
     const form = new FormData();
     form.append('image', new Blob([new Uint8Array(image)]), 'preview');
     form.append('thresholds', THRESHOLDS);
-    form.append('heads', heads ? '1' : '0');
+    // boxes given (faces-only re-run): reuse those heads instead of detecting them again
+    form.append('heads', boxes ? '0' : '1');
+    form.append('boxes', JSON.stringify(boxes ?? []));
+    form.append('regions', '1');
     const response = await fetch(`${TAGGER_URL}/v2/analyze`, { method: 'POST', body: form });
     if (!response.ok) {
       throw new Error(`tagger HTTP ${response.status}: ${await response.text()}`);
@@ -388,9 +524,15 @@ export class DanbooruService extends BaseService {
     const previous = previousRow?.value as Marker | undefined;
     const facesOnly = previous?.model === FACES_ONLY_MODEL;
 
-    const result = await this.analyze(await this.storageRepository.readFile(previewPath), !facesOnly);
-    if (facesOnly) {
-      result.heads = await this.storedHeads(assetId, ownerId);
+    const stored = facesOnly ? await this.storedHeads(assetId, ownerId) : undefined;
+    const image = await this.storageRepository.readFile(previewPath);
+    const result = await this.analyze(
+      image,
+      stored?.map(({ box }) => box),
+    );
+    if (stored) {
+      // the tagger returns the given boxes in order, with their region scores
+      result.heads = stored.map((head, i) => ({ ...head, character: result.heads[i]?.character }));
     }
 
     const tagIds = facesOnly ? previous.tagIds : await this.applyTags(assetId, ownerId, result, previous);
@@ -403,6 +545,7 @@ export class DanbooruService extends BaseService {
       faceIds: faces.map(({ id }) => id),
       faces,
       removed,
+      characters: result.tags.character,
     };
     await this.assetRepository.upsertMetadata(assetId, [{ key: DANBOORU_MARKER_KEY, value: marker }]);
     this.logger.debug(
@@ -522,12 +665,27 @@ export class DanbooruService extends BaseService {
         boundingBoxY2: box[3],
         sourceType: SourceType.Manual,
       });
-      created.push({ id, person: face.personGroupId, source: face.source, box });
+      created.push({
+        id,
+        person: face.personGroupId,
+        source: face.source,
+        box,
+        ...(face.confirmed && { confirmed: true }),
+      });
       if (face.personGroupId) {
         affected.add(face.personGroupId);
       }
       if (face.vector) {
-        this.index.set(id, { assetId, ownerId, vector: face.vector, person: face.personGroupId, source: face.source });
+        this.index.set(id, {
+          assetId,
+          ownerId,
+          vector: face.vector,
+          person: face.personGroupId,
+          source: face.source,
+          confirmed: face.confirmed,
+          regions: face.regions,
+          size: boxSize(box),
+        });
       }
     }
     await this.saveAssetIndex(assetId, ownerId);
@@ -535,82 +693,110 @@ export class DanbooruService extends BaseService {
     return { faces: [...kept, ...created], removed };
   }
 
-  /** CCIP references per person of this owner: only faces whose person can be trusted (isReference) */
-  private async referencesFor(ownerId: string) {
+  /** CCIP references of this owner: for pairing with pixai characters, and for the fallback */
+  private async referencesFor(ownerId: string): Promise<References> {
     const faceIds = [...this.index].filter(([, entry]) => entry.ownerId === ownerId).map(([id]) => id);
-    const references = new Map<string, Float32Array[]>();
+    const references: References = { pair: new Map(), fallback: new Map() };
+    const add = (map: Map<string, Float32Array[]>, person: string, vector: Float32Array) =>
+      map.set(person, [...(map.get(person) ?? []), vector]);
     for (const row of await this.personRepository.getFacePersons(faceIds)) {
       const entry = this.index.get(row.id);
-      if (!entry || !isReference(entry, row)) {
+      if (!entry || !row.personGroupId) {
         continue;
       }
-      const list = references.get(row.personGroupId!) ?? [];
-      list.push(entry.vector);
-      references.set(row.personGroupId!, list);
+      if (isReference(entry, row)) {
+        add(references.pair, row.personGroupId, entry.vector);
+      }
+      if (isFallbackReference(entry, row, this.pixaiPeople)) {
+        add(references.fallback, row.personGroupId, entry.vector);
+      }
     }
     return references;
   }
 
-  async assignFaces(ownerId: string, result: TaggerResult, references: Map<string, Float32Array[]>) {
+  async assignFaces(ownerId: string, result: TaggerResult, references: References) {
     const whole: FaceBox = { x1: 0, y1: 0, x2: result.width, y2: result.height };
     const heads = result.heads.map((head) => ({
       box: { x1: head.box[0], y1: head.box[1], x2: head.box[2], y2: head.box[3] },
-      vector: normalize(head.ccip),
+      vector: head.ccip ? normalize(head.ccip) : undefined,
+      regions: head.character,
     }));
     // sequential on purpose: personFor may create a person and caches the names
-    const characters = await Array.fromAsync(Object.keys(result.tags.character), (name) =>
-      this.personFor(ownerId, personName(name)),
-    );
+    const tags = Object.keys(result.tags.character);
+    const characters = await Array.fromAsync(tags, (name) => this.personFor(ownerId, personName(name)));
+    const nameOf = new Map(characters.map((person, i) => [person, tagKey(tags[i])]));
+    for (const person of characters) {
+      this.pixaiPeople.add(person);
+    }
 
     const faces: NewFace[] = [];
     const freeHeads = new Set(heads.keys());
     const freeCharacters = new Set(characters);
+    const take = (head: number, person: string, confirmed: boolean) => {
+      faces.push({ ...heads[head], personGroupId: person, source: 'pixai', confirmed });
+      freeHeads.delete(head);
+      freeCharacters.delete(person);
+    };
+    const regionScore = (head: number, person: string) =>
+      regionRanking(heads[head].regions, [nameOf.get(person)!]).best.score;
 
-    // pixai characters → heads, closest reference distance first
+    // 1. region pixai: heads whose region clearly shows one of the image's characters
+    const winners = [...freeHeads]
+      .map((head) => ({
+        head,
+        win: regionWinner(
+          heads[head].regions,
+          characters.map((c) => nameOf.get(c)!),
+        ),
+      }))
+      .filter(({ win }) => win)
+      .sort((a, b) => b.win!.score - a.win!.score);
+    for (const { head, win } of winners) {
+      const person = characters.find((c) => nameOf.get(c) === win!.name)!;
+      if (freeHeads.has(head) && freeCharacters.has(person)) {
+        take(head, person, true);
+      }
+    }
+
+    // 2. the rest: closest trusted references (heads whose region contradicts are skipped)
     const pairs: Array<{ head: number; person: string; distance: number }> = [];
-    for (const [head, { vector }] of heads.entries()) {
-      for (const person of characters) {
-        const refs = references.get(person);
-        if (refs?.length) {
+    for (const head of freeHeads) {
+      const { vector } = heads[head];
+      for (const person of freeCharacters) {
+        const refs = references.pair.get(person);
+        if (vector && refs?.length) {
           pairs.push({ head, person, distance: distanceToReferences(vector, refs) });
         }
       }
     }
     pairs.sort((a, b) => a.distance - b.distance);
-    for (const { head, person } of pairs) {
-      if (!(freeHeads.has(head) && freeCharacters.has(person))) {
-        continue;
+    for (const { head, person, distance } of pairs) {
+      if (distance <= PAIR_DISTANCE && freeHeads.has(head) && freeCharacters.has(person)) {
+        take(head, person, regionScore(head, person) >= REGION_SCORE);
       }
-
-      faces.push({ ...heads[head], personGroupId: person, source: 'pixai' });
-      freeHeads.delete(head);
-      freeCharacters.delete(person);
     }
-    // one head and one character left (e.g. a character seen for the first time): pair them
+
+    // 3. one head and one character left (e.g. a character seen for the first time): pair them,
+    //    unless the region does not show the character at all (a glove taken for a head)
     if (freeHeads.size === 1 && freeCharacters.size === 1) {
       const [head] = freeHeads;
       const [person] = freeCharacters;
-      faces.push({ ...heads[head], personGroupId: person, source: 'pixai' });
-      freeHeads.clear();
-      freeCharacters.clear();
+      const score = regionScore(head, person);
+      if (!heads[head].regions || score >= 0.1) {
+        take(head, person, score >= REGION_SCORE);
+      }
     }
-    // characters without a head: whole-image face, as the old worker did
+
+    // 4. characters without a head: whole-image face
     for (const person of freeCharacters) {
       faces.push({ box: whole, personGroupId: person, source: 'whole' });
     }
-    // heads without a pixai character: strict match against all known characters, else unassigned
-    const used = new Set(faces.map(({ personGroupId }) => personGroupId));
+
+    // 5. heads without a pixai character: the fallback into people pixai does not know, else unassigned
+    const used = new Set(faces.map(({ personGroupId }) => personGroupId).filter(Boolean) as string[]);
     for (const head of freeHeads) {
-      let best: { person: string; distance: number } | undefined;
-      for (const [person, refs] of references) {
-        if (used.has(person) || refs.length < 2) {
-          continue;
-        }
-        const distance = distanceToReferences(heads[head].vector, refs);
-        if (distance <= MATCH_DISTANCE && (!best || distance < best.distance)) {
-          best = { person, distance };
-        }
-      }
+      const { vector, box } = heads[head];
+      const best = vector ? fallbackMatch(vector, boxSize(box), references, used) : undefined;
       if (best) {
         used.add(best.person);
       }
@@ -620,6 +806,7 @@ export class DanbooruService extends BaseService {
   }
 
   async maintenance() {
+    this.pixaiPeople = await this.personRepository.getDanbooruPixaiPeople();
     await this.revealAutoHidden();
     await this.deleteEmptyClusters();
     const owners = new Set(this.index.values().map(({ ownerId }) => ownerId));
@@ -637,26 +824,26 @@ export class DanbooruService extends BaseService {
     const stats = { paired: 0, matched: 0, clustered: 0, clusters: 0, left: 0 };
     const faceIds = [...this.index].filter(([, entry]) => entry.ownerId === ownerId).map(([id]) => id);
     const rows = await this.personRepository.getFacePersons(faceIds);
-    const references = new Map<string, Float32Array[]>();
+    const references = await this.referencesFor(ownerId);
     const unassigned = new Map<string, string[]>();
     // heads in an unnamed cluster may still be paired: a character pixai named on the image wins
     const clustered = new Set<string>();
     for (const row of rows) {
       const entry = this.index.get(row.id)!;
       const unnamedCluster = !!row.personGroupId && !row.name && entry.source === 'cluster';
-      if (!row.personGroupId || unnamedCluster) {
-        unassigned.set(entry.assetId, [...(unassigned.get(entry.assetId) ?? []), row.id]);
-        if (unnamedCluster) {
-          clustered.add(row.id);
-        }
-      } else if (isReference(entry, row)) {
-        references.set(row.personGroupId, [...(references.get(row.personGroupId) ?? []), entry.vector]);
+      if (row.personGroupId && !unnamedCluster) {
+        continue;
+      }
+
+      unassigned.set(entry.assetId, [...(unassigned.get(entry.assetId) ?? []), row.id]);
+      if (unnamedCluster) {
+        clustered.add(row.id);
       }
     }
     await this.repairLostPairings(ownerId, rows);
     // face changes per image, written to its marker and CCIP file (null = face deleted)
-    const changes = new Map<string, Map<string, { person: string; source: FaceSource } | null>>();
-    const change = (faceId: string, value: { person: string; source: FaceSource } | null, assetId?: string) => {
+    const changes = new Map<string, Map<string, FaceChange | null>>();
+    const change = (faceId: string, value: FaceChange | null, assetId?: string) => {
       const asset = assetId ?? this.index.get(faceId)!.assetId;
       changes.set(asset, (changes.get(asset) ?? new Map()).set(faceId, value));
     };
@@ -676,12 +863,34 @@ export class DanbooruService extends BaseService {
           face.boundingBoxY2 >= face.imageHeight - 1,
       );
 
-      // 1. heads ↔ the characters pixai named on this image (their whole-image faces)
-      const pairs: Array<{ head: string; face: (typeof wholeImage)[number]; distance: number }> = [];
+      // 1. heads ↔ the characters pixai named on this image (their whole-image faces):
+      //    a clear region winner first, then the closest trusted references
+      const freeHeads = new Set(heads);
+      const usedFaces = new Set<string>();
+      const pairWith = async (head: string, face: (typeof wholeImage)[number], confirmed: boolean) => {
+        await this.personRepository.reassignFace(head, face.personGroupId!);
+        await this.personRepository.deleteAssetFace(face.id);
+        change(head, { person: face.personGroupId!, source: 'pixai', ...(confirmed && { confirmed }) });
+        change(face.id, null, assetId);
+        affected.add(face.personGroupId!);
+        freeHeads.delete(head);
+        usedFaces.add(face.id);
+        stats.paired++;
+      };
+      const wholeName = (face: (typeof wholeImage)[number]) => (face.person?.name ?? '').toLowerCase();
+      const names = wholeImage.map((face) => wholeName(face));
       for (const head of heads) {
+        const win = regionWinner(this.index.get(head)!.regions, names);
+        const face = win && wholeImage.find((candidate) => wholeName(candidate) === win.name);
+        if (face && freeHeads.has(head) && !usedFaces.has(face.id)) {
+          await pairWith(head, face, true);
+        }
+      }
+      const pairs: Array<{ head: string; face: (typeof wholeImage)[number]; distance: number }> = [];
+      for (const head of freeHeads) {
         for (const face of wholeImage) {
-          const refs = references.get(face.personGroupId!);
-          if (!refs?.length) {
+          const refs = references.pair.get(face.personGroupId!);
+          if (!refs?.length || usedFaces.has(face.id)) {
             continue;
           }
           const distance = distanceToReferences(this.index.get(head)!.vector, refs);
@@ -691,38 +900,23 @@ export class DanbooruService extends BaseService {
         }
       }
       pairs.sort((a, b) => a.distance - b.distance);
-      const freeHeads = new Set(heads);
-      const usedFaces = new Set<string>();
       for (const { head, face } of pairs) {
         if (!freeHeads.has(head) || usedFaces.has(face.id)) {
           continue;
         }
 
-        await this.personRepository.reassignFace(head, face.personGroupId!);
-        await this.personRepository.deleteAssetFace(face.id);
-        change(head, { person: face.personGroupId!, source: 'pixai' });
-        change(face.id, null, assetId);
-        affected.add(face.personGroupId!);
-        freeHeads.delete(head);
-        usedFaces.add(face.id);
-        stats.paired++;
+        const score = regionRanking(this.index.get(head)!.regions, [wholeName(face)]).best.score;
+        await pairWith(head, face, score >= REGION_SCORE);
       }
 
-      // 2. the rest: strict match against all characters not yet on this image (clustered heads stay put)
+      // 2. the rest: the fallback into people pixai does not know (clustered heads stay put)
       for (const head of freeHeads) {
         if (clustered.has(head)) {
           continue;
         }
-        let best: { person: string; distance: number } | undefined;
-        for (const [person, refs] of references) {
-          if (present.has(person) || refs.length < 2) {
-            continue;
-          }
-          const distance = distanceToReferences(this.index.get(head)!.vector, refs);
-          if (distance <= MATCH_DISTANCE && (!best || distance < best.distance)) {
-            best = { person, distance };
-          }
-        }
+        const entry = this.index.get(head)!;
+        // size unknown (CCIP file from before head sizes were stored): no fallback until the next re-run
+        const best = fallbackMatch(entry.vector, entry.size ?? 0, references, present as Set<string>);
         if (best) {
           await this.personRepository.reassignFace(head, best.person);
           change(head, { person: best.person, source: 'ccip' });
@@ -757,7 +951,7 @@ export class DanbooruService extends BaseService {
   private async clusterRemaining(
     ownerId: string,
     remaining: string[],
-    change: (faceId: string, value: { person: string; source: FaceSource }) => void,
+    change: (faceId: string, value: FaceChange) => void,
     affected: Set<string>,
     stats: { clustered: number; clusters: number },
   ) {
@@ -820,7 +1014,7 @@ export class DanbooruService extends BaseService {
       }
       const faces = await this.personRepository.getFaces(assetId, { viewingUserId: ownerId });
       const existing = new Set(faces.map(({ id }) => id));
-      const faceChanges = new Map<string, { person: string; source: FaceSource } | null>();
+      const faceChanges = new Map<string, FaceChange | null>();
       for (const head of heads) {
         const whole = marker.faces.find(
           (record) =>
@@ -846,11 +1040,7 @@ export class DanbooruService extends BaseService {
   }
 
   /** apply maintenance changes to an image's marker and CCIP file (null = the face was deleted) */
-  private async recordChanges(
-    assetId: string,
-    ownerId: string,
-    faceChanges: Map<string, { person: string; source: FaceSource } | null>,
-  ) {
+  private async recordChanges(assetId: string, ownerId: string, faceChanges: Map<string, FaceChange | null>) {
     for (const [faceId, value] of faceChanges) {
       const entry = this.index.get(faceId);
       if (entry && value) {
@@ -937,10 +1127,16 @@ export class DanbooruService extends BaseService {
       return;
     }
     const faces: Record<string, number[]> = {};
-    const records: Record<string, { person: string | null; source: FaceSource }> = {};
+    const records: Record<string, Omit<IndexEntry, 'assetId' | 'ownerId' | 'vector'>> = {};
     for (const [id, entry] of entries) {
       faces[id] = Array.from(entry.vector, (value) => Math.round(value * 1e6) / 1e6);
-      records[id] = { person: entry.person ?? null, source: entry.source ?? 'none' };
+      records[id] = {
+        person: entry.person ?? null,
+        source: entry.source ?? 'none',
+        ...(entry.confirmed && { confirmed: true }),
+        ...(entry.regions && { regions: entry.regions }),
+        ...(entry.size !== undefined && { size: entry.size }),
+      };
     }
     await mkdir(this.indexFolder, { recursive: true });
     await writeFile(path, JSON.stringify({ assetId, ownerId, faces, records }));
