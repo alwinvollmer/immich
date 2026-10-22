@@ -9,6 +9,7 @@ give the same tags (benchmark 2026-10-20). The nocturna FP16 export needs 8 GB R
 import json
 import logging
 import os
+import re
 
 import numpy as np
 import onnxruntime as ort
@@ -48,6 +49,8 @@ class PixaiTagger:
         cfg = json.load(open(hf_hub_download(REPO, CONFIG), encoding="utf-8"))
         self.tags = cfg["tags"]
         self.default_thresholds = cfg["category_best_threshold"]
+        offset, count = dict((c, (o, n)) for c, o, n in self._splits(cfg))["character"]
+        self.character_tags = set(self.tags[offset:offset + count])
         self.splits = {}
         offset = 0
         for category, count in cfg["tags_split"]:
@@ -61,6 +64,23 @@ class PixaiTagger:
             f"{MODEL_NAME} loaded from {REPO}/{GRAPH} ({'logits' if self.logits else 'probs'}) "
             f"with {self.session.get_providers()}"
         )
+
+    @staticmethod
+    def _splits(cfg):
+        offset = 0
+        for category, count in cfg["tags_split"]:
+            yield category, offset, count
+            offset += count
+
+    def base_character(self, tag: str) -> str:
+        """costume variants are the same character: name_(costume)_(series) -> name_(series),
+        when pixai knows that base tag (asuna_(bunny)_(blue_archive) -> asuna_(blue_archive))"""
+        match = re.match(r"^(.*)_\([^()]*\)_\(([^()]*)\)$", tag)
+        if match:
+            base = f"{match.group(1)}_({match.group(2)})"
+            if base in self.character_tags:
+                return base
+        return tag
 
     def preprocess(self, image: Image.Image) -> np.ndarray:
         if image.mode != "RGB":
@@ -92,4 +112,10 @@ class PixaiTagger:
             idx = np.flatnonzero(scores >= floor)
             ordered = idx[np.argsort(-scores[idx])]
             result[category] = {self.tags[offset + int(i)]: round(float(scores[i]), 4) for i in ordered}
+        # costume variants merge into their character (highest score wins)
+        merged = {}
+        for tag, score in result["character"].items():
+            base = self.base_character(tag)
+            merged[base] = max(merged.get(base, 0.0), score)
+        result["character"] = dict(sorted(merged.items(), key=lambda item: -item[1]))
         return result

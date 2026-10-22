@@ -68,6 +68,9 @@ const MIN_HEAD = Number(process.env.IMMICH_DANBOORU_MIN_HEAD ?? 64);
 // where it disagreed with the old CCIP pairing)
 const REGION_SCORE = Number(process.env.IMMICH_DANBOORU_REGION_SCORE ?? 0.27);
 const REGION_GAP = Number(process.env.IMMICH_DANBOORU_REGION_GAP ?? 0.2);
+// the head alone must show the character too: a box on someone else's head (a man above Neru, a glove
+// above 2B) inherits the character from the body below in the region crop, but not in the head crop
+const HEAD_SCORE = Number(process.env.IMMICH_DANBOORU_HEAD_SCORE ?? 0.1);
 // a head on an image whose characters pixai named only needs to be closer to one of them than this
 // (independent of the fallback: pixai already said the character is on the image)
 const PAIR_DISTANCE = Number(process.env.IMMICH_DANBOORU_PAIR_DISTANCE || 0.42);
@@ -88,8 +91,9 @@ type TaggerHead = {
   box: [number, number, number, number];
   score?: number;
   ccip?: number[];
-  // pixai's character scores on the head region (regions=1)
+  // pixai's character scores on the head region and on the head alone (regions=1)
   character?: Record<string, number>;
+  head?: Record<string, number>;
 };
 export type TaggerResult = {
   model: string;
@@ -132,6 +136,7 @@ type IndexEntry = {
   source?: FaceSource;
   confirmed?: boolean;
   regions?: Record<string, number>;
+  headScores?: Record<string, number>;
   size?: number;
 };
 type Candidate = { id: string; ownerId: string; previewPath: string };
@@ -143,6 +148,7 @@ type NewFace = {
   vector?: Float32Array;
   confirmed?: boolean;
   regions?: Record<string, number>;
+  headScores?: Record<string, number>;
 };
 type FaceChange = { person: string; source: FaceSource; confirmed?: boolean };
 /** CCIP references: for pairing heads with pixai characters, and for the fallback into other people */
@@ -194,6 +200,31 @@ const boxSize = (box: Box | FaceBox) =>
 
 const tagKey = (name: string) => name.replaceAll('_', ' ').toLowerCase();
 
+/** the head detector sometimes finds one head twice: overlapping boxes, or one mostly inside the other */
+const sameHead = (a: Box, b: Box) => {
+  const w = Math.max(0, Math.min(a[2], b[2]) - Math.max(a[0], b[0]));
+  const h = Math.max(0, Math.min(a[3], b[3]) - Math.max(a[1], b[1]));
+  const area = (box: Box) => Math.max(0, box[2] - box[0]) * Math.max(0, box[3] - box[1]);
+  const smaller = Math.min(area(a), area(b));
+  return overlap(a, b) > 0.5 || (smaller > 0 && (w * h) / smaller > 0.8);
+};
+
+/** indexes of the heads to keep: the first of each set of duplicates (best detection score first) */
+export const distinctHeads = (heads: Array<{ box: Box; score?: number }>) => {
+  const order = [...heads.keys()].sort((a, b) => (heads[b].score ?? 0) - (heads[a].score ?? 0));
+  const kept: number[] = [];
+  for (const i of order) {
+    if (kept.every((j) => !sameHead(heads[i].box, heads[j].box))) {
+      kept.push(i);
+    }
+  }
+  return kept.sort((a, b) => a - b);
+};
+
+/** the head region clearly shows a character pixai knows: it belongs to no group of unknown characters */
+const regionClaimed = (regions: Record<string, number> | undefined) =>
+  Object.values(regions ?? {}).some((score) => score >= REGION_SCORE);
+
 /** best and second-best region score among these character names (lower case, spaces) */
 const regionRanking = (regions: Record<string, number> | undefined, names: string[]) => {
   const scores = new Map(Object.entries(regions ?? {}).map(([tag, score]) => [tagKey(tag), score]));
@@ -201,13 +232,23 @@ const regionRanking = (regions: Record<string, number> | undefined, names: strin
   return { best: ranked[0], second: ranked[1]?.score ?? 0 };
 };
 
-/** a clear region winner: score and lead over the second-best character */
-const regionWinner = (regions: Record<string, number> | undefined, names: string[]) => {
+/** the head alone shows this character (unknown when the tagger did not score heads) */
+const headShows = (headScores: Record<string, number> | undefined, name: string) =>
+  !headScores || regionRanking(headScores, [name]).best.score >= HEAD_SCORE;
+
+/** a clear region winner that the head alone confirms: score and lead over the second-best character */
+const regionWinner = (
+  regions: Record<string, number> | undefined,
+  names: string[],
+  headScores?: Record<string, number>,
+) => {
   if (!regions || names.length === 0) {
     return;
   }
   const { best, second } = regionRanking(regions, names);
-  return best.score >= REGION_SCORE && best.score - second >= REGION_GAP ? best : undefined;
+  return best.score >= REGION_SCORE && best.score - second >= REGION_GAP && headShows(headScores, best.name)
+    ? best
+    : undefined;
 };
 
 /**
@@ -407,6 +448,7 @@ export class DanbooruService extends BaseService {
               source: FaceSource;
               confirmed?: boolean;
               regions?: Record<string, number>;
+              headScores?: Record<string, number>;
               size?: number;
             }
           >;
@@ -532,7 +574,11 @@ export class DanbooruService extends BaseService {
     );
     if (stored) {
       // the tagger returns the given boxes in order, with their region scores
-      result.heads = stored.map((head, i) => ({ ...head, character: result.heads[i]?.character }));
+      result.heads = stored.map((head, i) => ({
+        ...head,
+        character: result.heads[i]?.character,
+        head: result.heads[i]?.head,
+      }));
     }
 
     const tagIds = facesOnly ? previous.tagIds : await this.applyTags(assetId, ownerId, result, previous);
@@ -684,6 +730,7 @@ export class DanbooruService extends BaseService {
           source: face.source,
           confirmed: face.confirmed,
           regions: face.regions,
+          headScores: face.headScores,
           size: boxSize(box),
         });
       }
@@ -716,11 +763,14 @@ export class DanbooruService extends BaseService {
 
   async assignFaces(ownerId: string, result: TaggerResult, references: References) {
     const whole: FaceBox = { x1: 0, y1: 0, x2: result.width, y2: result.height };
-    const heads = result.heads.map((head) => ({
-      box: { x1: head.box[0], y1: head.box[1], x2: head.box[2], y2: head.box[3] },
-      vector: head.ccip ? normalize(head.ccip) : undefined,
-      regions: head.character,
-    }));
+    const heads = distinctHeads(result.heads)
+      .map((i) => result.heads[i])
+      .map((head) => ({
+        box: { x1: head.box[0], y1: head.box[1], x2: head.box[2], y2: head.box[3] },
+        vector: head.ccip ? normalize(head.ccip) : undefined,
+        regions: head.character,
+        headScores: head.head,
+      }));
     // sequential on purpose: personFor may create a person and caches the names
     const tags = Object.keys(result.tags.character);
     const characters = await Array.fromAsync(tags, (name) => this.personFor(ownerId, personName(name)));
@@ -747,6 +797,7 @@ export class DanbooruService extends BaseService {
         win: regionWinner(
           heads[head].regions,
           characters.map((c) => nameOf.get(c)!),
+          heads[head].headScores,
         ),
       }))
       .filter(({ win }) => win)
@@ -770,8 +821,9 @@ export class DanbooruService extends BaseService {
       }
     }
     pairs.sort((a, b) => a.distance - b.distance);
+    const headOk = (head: number, person: string) => headShows(heads[head].headScores, nameOf.get(person)!);
     for (const { head, person, distance } of pairs) {
-      if (distance <= PAIR_DISTANCE && freeHeads.has(head) && freeCharacters.has(person)) {
+      if (distance <= PAIR_DISTANCE && freeHeads.has(head) && freeCharacters.has(person) && headOk(head, person)) {
         take(head, person, regionScore(head, person) >= REGION_SCORE);
       }
     }
@@ -782,7 +834,7 @@ export class DanbooruService extends BaseService {
       const [head] = freeHeads;
       const [person] = freeCharacters;
       const score = regionScore(head, person);
-      if (!heads[head].regions || score >= 0.1) {
+      if ((!heads[head].regions || score >= 0.1) && headOk(head, person)) {
         take(head, person, score >= REGION_SCORE);
       }
     }
@@ -795,8 +847,9 @@ export class DanbooruService extends BaseService {
     // 5. heads without a pixai character: the fallback into people pixai does not know, else unassigned
     const used = new Set(faces.map(({ personGroupId }) => personGroupId).filter(Boolean) as string[]);
     for (const head of freeHeads) {
-      const { vector, box } = heads[head];
-      const best = vector ? fallbackMatch(vector, boxSize(box), references, used) : undefined;
+      const { vector, box, regions } = heads[head];
+      const best =
+        vector && !regionClaimed(regions) ? fallbackMatch(vector, boxSize(box), references, used) : undefined;
       if (best) {
         used.add(best.person);
       }
@@ -880,7 +933,8 @@ export class DanbooruService extends BaseService {
       const wholeName = (face: (typeof wholeImage)[number]) => (face.person?.name ?? '').toLowerCase();
       const names = wholeImage.map((face) => wholeName(face));
       for (const head of heads) {
-        const win = regionWinner(this.index.get(head)!.regions, names);
+        const entry = this.index.get(head)!;
+        const win = regionWinner(entry.regions, names, entry.headScores);
         const face = win && wholeImage.find((candidate) => wholeName(candidate) === win.name);
         if (face && freeHeads.has(head) && !usedFaces.has(face.id)) {
           await pairWith(head, face, true);
@@ -901,11 +955,12 @@ export class DanbooruService extends BaseService {
       }
       pairs.sort((a, b) => a.distance - b.distance);
       for (const { head, face } of pairs) {
-        if (!freeHeads.has(head) || usedFaces.has(face.id)) {
+        const entry = this.index.get(head)!;
+        if (!freeHeads.has(head) || usedFaces.has(face.id) || !headShows(entry.headScores, wholeName(face))) {
           continue;
         }
 
-        const score = regionRanking(this.index.get(head)!.regions, [wholeName(face)]).best.score;
+        const score = regionRanking(entry.regions, [wholeName(face)]).best.score;
         await pairWith(head, face, score >= REGION_SCORE);
       }
 
@@ -915,6 +970,9 @@ export class DanbooruService extends BaseService {
           continue;
         }
         const entry = this.index.get(head)!;
+        if (regionClaimed(entry.regions)) {
+          continue;
+        }
         // size unknown (CCIP file from before head sizes were stored): no fallback until the next re-run
         const best = fallbackMatch(entry.vector, entry.size ?? 0, references, present as Set<string>);
         if (best) {
@@ -1135,6 +1193,7 @@ export class DanbooruService extends BaseService {
         source: entry.source ?? 'none',
         ...(entry.confirmed && { confirmed: true }),
         ...(entry.regions && { regions: entry.regions }),
+        ...(entry.headScores && { headScores: entry.headScores }),
         ...(entry.size !== undefined && { size: entry.size }),
       };
     }

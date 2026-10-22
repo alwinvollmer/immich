@@ -7,6 +7,7 @@ import {
   TaggerResult,
   cleanTagName,
   distanceToReferences,
+  distinctHeads,
   personName,
 } from 'src/services/danbooru.service.js';
 import { ServiceMocks, newTestService } from 'test/utils.js';
@@ -208,7 +209,7 @@ describe(DanbooruService.name, () => {
     it('adds a head without a pixai character only to a group pixai does not know', async () => {
       const faces = await sut.assignFaces(
         ownerId,
-        result({ heads: [head(0), head(5)] }),
+        result({ heads: [head(0), head(5, [300, 300, 400, 400])] }),
         refs(
           [['p-megumin', [axis(5), axis(5, 0.01), axis(5, 0.02)]]],
           [['p-hsin', [axis(0), axis(0, 0.01), axis(0, 0.02)]]],
@@ -234,6 +235,59 @@ describe(DanbooruService.name, () => {
         refs([], [['p-hsin', [axis(0), axis(0, 0.01), axis(0, 0.02)]]]),
       );
       expect([ambiguous[0].personGroupId, tooFew[0].personGroupId, tiny[0].personGroupId]).toEqual([null, null, null]);
+    });
+
+    it('does not put a character on a head that only its region shows (the man above Neru)', async () => {
+      const man = { ...head(0, [864, 682, 960, 805], { megumin: 0.997 }), head: {} };
+      const faces = await sut.assignFaces(
+        ownerId,
+        result({ tags: characters({ megumin: 0.99 }), heads: [man] }),
+        refs(),
+      );
+      expect(faces.map(({ personGroupId, source }) => [personGroupId, source])).toEqual([
+        ['p-megumin', 'whole'],
+        [null, 'none'],
+      ]);
+    });
+
+    it('confirms a region winner that the head alone shows too', async () => {
+      const real = { ...head(0, [266, 553, 470, 752], { megumin: 0.98 }), head: { megumin: 0.49 } };
+      const faces = await sut.assignFaces(
+        ownerId,
+        result({ tags: characters({ megumin: 0.99 }), heads: [real] }),
+        refs(),
+      );
+      expect(faces).toEqual([
+        expect.objectContaining({ personGroupId: 'p-megumin', source: 'pixai', confirmed: true }),
+      ]);
+    });
+
+    it('keeps one head of a head the detector found twice', async () => {
+      expect(
+        distinctHeads([
+          { box: [420, 0, 1116, 607], score: 0.8 },
+          { box: [395, 0, 1430, 611], score: 0.9 },
+          { box: [1500, 0, 1600, 100], score: 0.7 },
+        ]),
+      ).toEqual([1, 2]);
+      const faces = await sut.assignFaces(
+        ownerId,
+        result({
+          tags: characters({ megumin: 0.9 }),
+          heads: [head(0, [420, 0, 1116, 607], { megumin: 0.99 }), head(0, [395, 0, 1430, 611], { megumin: 0.99 })],
+        }),
+        refs([], [['p-hsin', [axis(0), axis(0, 0.01), axis(0, 0.02)]]]),
+      );
+      expect(faces.map(({ personGroupId, source }) => [personGroupId, source])).toEqual([['p-megumin', 'pixai']]);
+    });
+
+    it('never puts a head into a group when its region clearly shows a pixai character', async () => {
+      const faces = await sut.assignFaces(
+        ownerId,
+        result({ heads: [head(0, undefined, { 'keqing_(genshin_impact)': 0.95 })] }),
+        refs([], [['p-group', [axis(0), axis(0, 0.01), axis(0, 0.02)]]]),
+      );
+      expect(faces.map(({ personGroupId, source }) => [personGroupId, source])).toEqual([[null, 'none']]);
     });
 
     it('creates a person for a character seen for the first time', async () => {
@@ -749,6 +803,45 @@ describe(DanbooruService.name, () => {
       await sut.maintenance();
 
       expect(mocks.person.reassignFace).toHaveBeenCalledWith('h1', 'p-mine');
+    });
+
+    it('neither matches nor clusters heads whose region clearly shows a pixai character', async () => {
+      const keqing = Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`k${i}`, axis(6, i * 0.01)]));
+      await loadIndex(sut, {
+        refs: {
+          assetId: 'refs',
+          faces: { r1: axis(6), r2: axis(6, 0.01), r3: axis(6, 0.02) },
+          records: {
+            r1: { person: 'p-group', source: 'cluster' },
+            r2: { person: 'p-group', source: 'cluster' },
+            r3: { person: 'p-group', source: 'cluster' },
+          },
+        },
+        keqing: {
+          assetId: 'keqing',
+          faces: keqing,
+          records: Object.fromEntries(
+            Object.keys(keqing).map((id) => [
+              id,
+              { person: null, source: 'none', size: 120, regions: { keqing: 0.9 } },
+            ]),
+          ) as never,
+        },
+      });
+      mocks.person.getFacePersons.mockResolvedValue([
+        { id: 'r1', personGroupId: 'p-group', ownerId, name: '' },
+        { id: 'r2', personGroupId: 'p-group', ownerId, name: '' },
+        { id: 'r3', personGroupId: 'p-group', ownerId, name: '' },
+        ...Object.keys(keqing).map((id) => ({ id, personGroupId: null, ownerId, name: null })),
+      ]);
+      mocks.person.getFaces.mockResolvedValue([]);
+      const fetchMock = vi.fn().mockResolvedValue(Response.json({ labels: [0, 0, 0, 0, 0] }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      await sut.maintenance();
+
+      expect(mocks.person.reassignFace).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
     });
 
     it('deletes unnamed people without faces', async () => {

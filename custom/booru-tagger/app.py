@@ -7,8 +7,9 @@ v2 (used by the Immich fork):
             "heads": [{"box": [x1, y1, x2, y2], "score", "ccip": [768 floats]}]}
         pixai-tagger-v1.0 + anime head detection + CCIP character embeddings
         (heads=0 skips head detection + CCIP: the server reuses heads it stored before and may pass
-        their boxes; regions=1 adds pixai's character scores per head region when the image has a
-        pixai character: heads[i].character = {tag: score})
+        their boxes; regions=1 adds pixai's character scores per head when the image has a pixai
+        character: heads[i].character = head + upper body region, heads[i].head = the head alone;
+        costume variants are merged into their character: asuna_(bunny)_(blue_archive) -> asuna_(blue_archive))
   POST /v2/regions  multipart: image=<file>, boxes=<json [[x1, y1, x2, y2], ...]>, floor=<float, default 0.05>
         -> {"regions": [{"box": [...], "character": {tag: score}}]}: pixai on each head region, enlarged
         to head + upper body (characters are recognised from hair, clothes and accessories too)
@@ -113,6 +114,7 @@ def analyze(
             if regions == "1" and tags["character"]:
                 for head in found:
                     head["character"] = _region_scores(rgb, head["box"])
+                    head["head"] = _region_scores(rgb, head["box"], mode="head")
         except Exception as e:
             log.exception("v2 analyze error")
             raise HTTPException(status_code=500, detail=str(e))
@@ -139,14 +141,22 @@ def _region(box: list, width: int, height: int) -> tuple:
     )
 
 
-def _region_scores(rgb: Image.Image, box: list, floor: float = 0.05) -> dict:
-    """pixai's character scores on a head region (characters are recognised from hair, clothes too)"""
-    crop = rgb.crop(_region(box, rgb.width, rgb.height))
+def _head(box: list, width: int, height: int) -> tuple:
+    """the head alone, with a quarter of its size as margin"""
+    x1, y1, x2, y2 = box
+    w, h = x2 - x1, y2 - y1
+    return (max(0, int(x1 - w / 4)), max(0, int(y1 - h / 4)), min(width, int(x2 + w / 4)), min(height, int(y2 + h / 4)))
+
+
+def _region_scores(rgb: Image.Image, box: list, floor: float = 0.05, mode: str = "region") -> dict:
+    """pixai's character scores on a head region (head + upper body: characters are recognised
+    from hair and clothes too) or on the head alone (a check that the box is the character's head)"""
+    crop = rgb.crop((_head if mode == "head" else _region)(box, rgb.width, rgb.height))
     return _v2["tagger"].predict(crop, {"character": floor, "general": 1.01, "copyright": 1.01})["character"]
 
 
 @app.post("/v2/regions")
-def regions(image: UploadFile = File(...), boxes: str = Form(...), floor: float = Form(0.05)):
+def regions(image: UploadFile = File(...), boxes: str = Form(...), floor: float = Form(0.05), mode: str = Form("region")):
     img = _open_image(image.file.read()).convert("RGB")
     try:
         box_list = json.loads(boxes)
@@ -156,7 +166,7 @@ def regions(image: UploadFile = File(...), boxes: str = Form(...), floor: float 
     with _v2_lock:
         started = time.time()
         for box in box_list:
-            out.append({"box": box, "character": _region_scores(img, box, floor)})
+            out.append({"box": box, "character": _region_scores(img, box, floor, mode)})
     log.info(f"v2 regions: {len(box_list)} boxes, {time.time() - started:.1f}s")
     return {"regions": out}
 
