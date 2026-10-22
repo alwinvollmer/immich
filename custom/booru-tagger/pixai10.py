@@ -75,11 +75,13 @@ class PixaiTagger:
     def base_character(self, tag: str) -> str:
         """costume variants are the same character: name_(costume)_(series) -> name_(series),
         when pixai knows that base tag (asuna_(bunny)_(blue_archive) -> asuna_(blue_archive))"""
-        match = re.match(r"^(.*)_\([^()]*\)_\(([^()]*)\)$", tag)
-        if match:
+        # nested forms step down one level at a time:
+        # jeanne_d'arc_alter_(avenger)_(third_ascension)_(fate) -> ..._(avenger)_(fate) -> ..._(fate)
+        while match := re.match(r"^(.*)_\([^()]*\)_\(([^()]*)\)$", tag):
             base = f"{match.group(1)}_({match.group(2)})"
-            if base in self.character_tags:
-                return base
+            if base not in self.character_tags:
+                break
+            tag = base
         return tag
 
     def preprocess(self, image: Image.Image) -> np.ndarray:
