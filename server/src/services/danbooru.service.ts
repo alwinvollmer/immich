@@ -211,7 +211,10 @@ const sameHead = (a: Box, b: Box) => {
 
 /** indexes of the heads to keep: the first of each set of duplicates (best detection score first) */
 export const distinctHeads = (heads: Array<{ box: Box; score?: number }>) => {
-  const order = [...heads.keys()].sort((a, b) => (heads[b].score ?? 0) - (heads[a].score ?? 0));
+  const order = heads
+    .keys()
+    .toArray()
+    .sort((a, b) => (heads[b].score ?? 0) - (heads[a].score ?? 0));
   const kept: number[] = [];
   for (const i of order) {
     if (kept.every((j) => !sameHead(heads[i].box, heads[j].box))) {
