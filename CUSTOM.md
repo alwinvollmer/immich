@@ -59,8 +59,8 @@ an optional album; 5 albums in the sidebar; archiving workaround removed.
    3,359 Immich ML junk faces on non-camera images deleted, `minFaces` back to 3; 296 empty
    People deleted; 1,032 People with one image hidden until a second image arrives (3c797b0).
    Fallback snowball (Tifa on ~900 images) repaired 2026-10-21: face sources recorded, references only
-   from trusted faces, faces-only re-run of all images (8b61d66..9bf538a). Open: recalibrate the CCIP
-   fallback with real negatives before switching it on again.
+   from trusted faces, faces-only re-run of all images (8b61d66..9bf538a). Region pixai + calibrated fallback only into
+   groups (8d6117d, 3bc8f1d), faces-only re-run of all images 2026-10-22: 7,084 region-confirmed heads.
 5. **Mobile app (later)** — own APK via Obtainium: point /api/server/apk-links
    (server.service.ts) at this fork's releases.
 
