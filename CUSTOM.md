@@ -61,6 +61,13 @@ an optional album; 5 albums in the sidebar; archiving workaround removed.
    Fallback snowball (Tifa on ~900 images) repaired 2026-10-21: face sources recorded, references only
    from trusted faces, faces-only re-run of all images (8b61d66..9bf538a). Region pixai + calibrated fallback only into
    groups (8d6117d, 3bc8f1d), faces-only re-run of all images 2026-10-22: 7,084 region-confirmed heads.
+   Head-crop check + duplicate heads + costume variants (376514d, 62aa38a), re-run of 6,640 images
+   2026-10-22/23: 6,974 confirmed heads, 2,043 whole, 92 ccip, 394 cluster, 4,956 none. Camera photos
+   get no Danbooru faces; `name_(costume)` variants merge into the bare name (0fb835d, 208 variant People deleted).
+   **TODO:** weak extra characters become whole-image faces. 26860c73 has 3 heads, all region-confirmed
+   (Yelan, Ganyu, Hu Tao), plus a 4th whole-image face for Shenhe at pixai 0.43 → 4 faces for 3 people.
+   Idea: no whole-image face for a low-score character (< ~0.6?) when every head already carries a
+   confirmed character; check how often that rule would drop a real character first.
 5. **Mobile app (later)** — own APK via Obtainium: point /api/server/apk-links
    (server.service.ts) at this fork's releases.
 
