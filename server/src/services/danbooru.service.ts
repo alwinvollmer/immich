@@ -76,6 +76,9 @@ const HEAD_SCORE = Number(process.env.IMMICH_DANBOORU_HEAD_SCORE ?? 0.1);
 // a head on an image whose characters pixai named only needs to be closer to one of them than this
 // (independent of the fallback: pixai already said the character is on the image)
 const PAIR_DISTANCE = Number(process.env.IMMICH_DANBOORU_PAIR_DISTANCE || 0.42);
+// every head already carries a region-confirmed character: a further character pixai names only weakly is
+// mostly a look-alike or no one (sample 2026-10-23: ~22 of 30 below 0.6 false), so it gets no whole-image face
+const EXTRA_SCORE = Number(process.env.IMMICH_DANBOORU_EXTRA_SCORE ?? 0.6);
 const CLUSTER_MIN = Number(process.env.IMMICH_DANBOORU_CLUSTER_MIN || 5);
 const MAINTENANCE_MS = Number(process.env.IMMICH_DANBOORU_MAINTENANCE_HOURS || 12) * 3_600_000;
 
@@ -787,6 +790,7 @@ export class DanbooruService extends BaseService {
     const tags = Object.keys(result.tags.character);
     const characters = await Array.fromAsync(tags, (name) => this.personFor(ownerId, personName(name)));
     const nameOf = new Map(characters.map((person, i) => [person, tagKey(tags[i])]));
+    const scoreOf = new Map(characters.map((person, i) => [person, result.tags.character[tags[i]]]));
     for (const person of characters) {
       this.pixaiPeople.add(person);
     }
@@ -851,8 +855,12 @@ export class DanbooruService extends BaseService {
       }
     }
 
-    // 4. characters without a head: whole-image face
+    // 4. characters without a head: whole-image face (only clear ones when every head is confirmed)
+    const allConfirmed = heads.length > 0 && freeHeads.size === 0 && faces.every(({ confirmed }) => confirmed);
     for (const person of freeCharacters) {
+      if (allConfirmed && scoreOf.get(person)! < EXTRA_SCORE) {
+        continue;
+      }
       faces.push({ box: whole, personGroupId: person, source: 'whole' });
     }
 

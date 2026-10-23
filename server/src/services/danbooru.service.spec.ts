@@ -263,6 +263,27 @@ describe(DanbooruService.name, () => {
       ]);
     });
 
+    // custom: 26860c73 — three confirmed heads plus Shenhe at 0.43 gave four faces for three people
+    it('gives a weak extra character no whole-image face when every head is confirmed', async () => {
+      const real = { ...head(0, [0, 0, 100, 100], { megumin: 0.98 }), head: { megumin: 0.5 } };
+      const weak = await sut.assignFaces(
+        ownerId,
+        result({ tags: characters({ megumin: 0.99, yunyun: 0.43 }), heads: [real] }),
+        refs(),
+      );
+      expect(weak.map(({ personGroupId, source }) => [personGroupId, source])).toEqual([['p-megumin', 'pixai']]);
+
+      const clear = await sut.assignFaces(
+        ownerId,
+        result({ tags: characters({ megumin: 0.99, yunyun: 0.8 }), heads: [real] }),
+        refs(),
+      );
+      expect(clear.map(({ personGroupId, source }) => [personGroupId, source])).toEqual([
+        ['p-megumin', 'pixai'],
+        ['p-yunyun', 'whole'],
+      ]);
+    });
+
     it('keeps one head of a head the detector found twice', async () => {
       expect(
         distinctHeads([

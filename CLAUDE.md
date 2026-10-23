@@ -130,6 +130,8 @@ merging a new upstream release. Back to stock = point `IMMICH_SERVER_IMAGE` at
   pixai/whole face is closed), never ccip as references (the old 0.21 rule snowballed ~730 heads into Tifa).
   Pairing heads with the characters pixai named = `IMMICH_DANBOORU_PAIR_DISTANCE` (0.42), independent.
   Re-tagging keeps faces the user reassigned and never recreates faces the user deleted.
+  When every head carries a region-confirmed character, a further character below
+  `IMMICH_DANBOORU_EXTRA_SCORE` (0.6) gets no whole-image face (mostly look-alikes, e.g. Shenhe 0.43 next to Ganyu).
   Faces-only re-run: set a marker's model to `recheck-faces` (pixai + region per stored head; ~36 img/min GPU).
   People with one image are hidden until a second image shows them (list
   `/data/custom/danbooru-autohidden.json`; new characters start hidden; manual hide/unhide is never touched).

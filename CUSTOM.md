@@ -64,7 +64,7 @@ an optional album; 5 albums in the sidebar; archiving workaround removed.
    Head-crop check + duplicate heads + costume variants (376514d, 62aa38a), re-run of 6,640 images
    2026-10-22/23: 6,974 confirmed heads, 2,043 whole, 92 ccip, 394 cluster, 4,956 none. Camera photos
    get no Danbooru faces; `name_(costume)` variants merge into the bare name (0fb835d, 208 variant People deleted).
-   **TODO:** weak extra characters become whole-image faces. 26860c73 has 3 heads, all region-confirmed
+   ~~**TODO:** weak extra characters become whole-image faces.~~ DONE 2026-10-23 (`IMMICH_DANBOORU_EXTRA_SCORE` 0.6). 26860c73 has 3 heads, all region-confirmed
    (Yelan, Ganyu, Hu Tao), plus a 4th whole-image face for Shenhe at pixai 0.43 → 4 faces for 3 people.
    Idea: no whole-image face for a low-score character (< ~0.6?) when every head already carries a
    confirmed character; check how often that rule would drop a real character first.
