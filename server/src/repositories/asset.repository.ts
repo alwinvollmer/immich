@@ -179,6 +179,21 @@ const withBoundingBox = <T>(qb: SelectQueryBuilder<DB, 'asset' | 'asset_exif', T
   );
 };
 
+// custom: a photo from the phone camera gets Danbooru tags but no Danbooru faces — in the camera album,
+// or a camera file name with an EXIF make (background backups only join the album at the next app sync)
+const danbooruCameraAsset = (cameraAlbum: string) => sql<boolean>`(
+  exists (
+    select 1 from album_asset
+    inner join album on album.id = album_asset."albumId"
+    where album_asset."assetId" = asset.id and album."deletedAt" is null
+      and lower(album."albumName") = lower(${cameraAlbum})
+  )
+  or (
+    asset."originalFileName" ~ '^(IMG|VID|PXL)_'
+    and exists (select 1 from asset_exif where asset_exif."assetId" = asset.id and asset_exif.make is not null)
+  )
+)`;
+
 @Injectable()
 export class AssetRepository {
   constructor(@InjectKysely() private db: Kysely<DB>) {}
@@ -1284,11 +1299,13 @@ export class AssetRepository {
     model,
     albumNames,
     includeUnsorted,
+    cameraAlbum,
     limit,
   }: {
     model: string;
     albumNames: string[];
     includeUnsorted: boolean;
+    cameraAlbum: string;
     limit: number;
   }) {
     const lowerNames = albumNames.map((name) => name.toLowerCase());
@@ -1301,6 +1318,7 @@ export class AssetRepository {
           .on('asset_file.isEdited', '=', sql.lit(false)),
       )
       .select(['asset.id', 'asset.ownerId', 'asset_file.path as previewPath'])
+      .select(danbooruCameraAsset(cameraAlbum).as('camera'))
       .where('asset.type', '=', sql.lit(AssetType.Image))
       .where('asset.deletedAt', 'is', null)
       .where('asset.visibility', 'in', [AssetVisibility.Timeline, AssetVisibility.Archive])
@@ -1334,6 +1352,20 @@ export class AssetRepository {
       )
       .orderBy('asset.createdAt', 'desc')
       .limit(limit)
+      .execute();
+  }
+
+  // custom: camera photos that still carry Danbooru faces (they joined the camera album after tagging)
+  getDanbooruCameraAssets(cameraAlbum: string) {
+    return this.db
+      .selectFrom('asset')
+      .innerJoin('asset_metadata', (join) =>
+        join.onRef('asset_metadata.assetId', '=', 'asset.id').on('asset_metadata.key', '=', 'custom.danbooru'),
+      )
+      .select(['asset.id', 'asset.ownerId'])
+      .where('asset.deletedAt', 'is', null)
+      .where(sql<boolean>`jsonb_array_length(coalesce(asset_metadata.value->'faces', '[]'::jsonb)) > 0`)
+      .where(danbooruCameraAsset(cameraAlbum))
       .execute();
   }
 }

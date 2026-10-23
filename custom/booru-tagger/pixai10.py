@@ -51,6 +51,8 @@ class PixaiTagger:
         self.default_thresholds = cfg["category_best_threshold"]
         offset, count = dict((c, (o, n)) for c, o, n in self._splits(cfg))["character"]
         self.character_tags = set(self.tags[offset:offset + count])
+        offset, count = dict((c, (o, n)) for c, o, n in self._splits(cfg))["copyright"]
+        self.copyright_tags = set(self.tags[offset:offset + count])
         self.splits = {}
         offset = 0
         for category, count in cfg["tags_split"]:
@@ -74,7 +76,9 @@ class PixaiTagger:
 
     def base_character(self, tag: str) -> str:
         """costume variants are the same character: name_(costume)_(series) -> name_(series),
-        when pixai knows that base tag (asuna_(bunny)_(blue_archive) -> asuna_(blue_archive))"""
+        when pixai knows that base tag (asuna_(bunny)_(blue_archive) -> asuna_(blue_archive)), and
+        name_(costume)[_(form)] -> name when pixai knows the bare name and no group is a series
+        (houshou_marine_(summer) -> houshou_marine; matou_sakura_(fate/zero) stays)"""
         # nested forms step down one level at a time:
         # jeanne_d'arc_alter_(avenger)_(third_ascension)_(fate) -> ..._(avenger)_(fate) -> ..._(fate)
         while match := re.match(r"^(.*)_\([^()]*\)_\(([^()]*)\)$", tag):
@@ -82,6 +86,11 @@ class PixaiTagger:
             if base not in self.character_tags:
                 break
             tag = base
+        if match := re.match(r"^(.*?)((?:_\([^()]*\))+)$", tag):
+            name, groups = match.group(1), re.findall(r"_\(([^()]*)\)", match.group(2))
+            series = any(g in self.copyright_tags or f"{g}_(series)" in self.copyright_tags for g in groups)
+            if name in self.character_tags and not series:
+                tag = name
         return tag
 
     def preprocess(self, image: Image.Image) -> np.ndarray:

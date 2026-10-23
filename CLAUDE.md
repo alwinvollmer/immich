@@ -134,6 +134,12 @@ merging a new upstream release. Back to stock = point `IMMICH_SERVER_IMAGE` at
   People with one image are hidden until a second image shows them (list
   `/data/custom/danbooru-autohidden.json`; new characters start hidden; manual hide/unhide is never touched).
 - Immich face detection only on camera photos (`IMMICH_FACES_CAMERA_ONLY=1`: EXIF make required).
+- Camera photos (in the `IMMICH_DANBOORU_CAMERA_ALBUM` album, default Camera, or an `IMG_`/`VID_`/`PXL_` name with
+  an EXIF make) get Danbooru tags but never Danbooru faces/CCIP heads; maintenance strips ours from photos that
+  joined the album later (Immich ML faces and faces drawn by hand stay).
+- Costume variants (booru-tagger `base_character`): `name_(x)_(series)` → `name_(series)` step by step, then
+  `name_(x)[_(y)]` → `name` when pixai knows the bare name and no group is a copyright tag
+  (`matou_sakura_(fate/zero)` stays).
 - Upscale: viewer ⋮ "Upscale ×2/×4" → `UpscaleService` (in-memory jobs, `on_upscale_update`
   websocket events) → `UpscalePanel`; result = new stack cover with the original's metadata/tags.
 - Mobile app: background backup never assigns folder albums (only foreground sync does);

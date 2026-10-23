@@ -57,5 +57,6 @@ export const newAssetRepositoryMock = (): Mocked<RepositoryInterface<AssetReposi
     getForFaces: vitest.fn(),
     getForUpdateTags: vitest.fn(),
     getDanbooruCandidates: vitest.fn().mockResolvedValue([]), // custom
+    getDanbooruCameraAssets: vitest.fn().mockResolvedValue([]), // custom
   };
 };

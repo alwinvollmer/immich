@@ -52,6 +52,8 @@ const ALBUM_NAMES = (process.env.IMMICH_DANBOORU_ALBUMS ?? 'Download,Reddit,9GAG
   .filter(Boolean);
 // images in no album are tagged too (set to 0 to test on one album only)
 const INCLUDE_UNSORTED = process.env.IMMICH_DANBOORU_INCLUDE_UNSORTED !== '0';
+// phone camera photos get tags but never Danbooru faces (see danbooruCameraAsset in the asset repository)
+const CAMERA_ALBUM = process.env.IMMICH_DANBOORU_CAMERA_ALBUM ?? 'Camera';
 const THRESHOLDS = process.env.IMMICH_DANBOORU_THRESHOLDS || '{}';
 // CCIP fallback for heads pixai did not name — only into people pixai does not know (groups, people
 // made by hand), never into pixai characters. Calibrated 2026-10-22 on 6,967 pixai heads + 4,007 heads
@@ -139,7 +141,7 @@ type IndexEntry = {
   headScores?: Record<string, number>;
   size?: number;
 };
-type Candidate = { id: string; ownerId: string; previewPath: string };
+type Candidate = { id: string; ownerId: string; previewPath: string; camera?: boolean };
 type FaceBox = { x1: number; y1: number; x2: number; y2: number };
 type NewFace = {
   box: FaceBox;
@@ -476,6 +478,7 @@ export class DanbooruService extends BaseService {
           model,
           albumNames: ALBUM_NAMES,
           includeUnsorted: INCLUDE_UNSORTED,
+          cameraAlbum: CAMERA_ALBUM,
           limit: BATCH_SIZE + this.failed.size,
         });
         candidates = rows.filter(({ id }) => !this.failed.has(id));
@@ -564,7 +567,7 @@ export class DanbooruService extends BaseService {
     return (await response.json()) as TaggerResult;
   }
 
-  async processAsset({ id: assetId, ownerId, previewPath }: Candidate) {
+  async processAsset({ id: assetId, ownerId, previewPath, camera }: Candidate) {
     const previousRow = await this.assetRepository.getMetadataByKey(assetId, DANBOORU_MARKER_KEY);
     const previous = previousRow?.value as Marker | undefined;
     const facesOnly = previous?.model === FACES_ONLY_MODEL;
@@ -585,7 +588,7 @@ export class DanbooruService extends BaseService {
     }
 
     const tagIds = facesOnly ? previous.tagIds : await this.applyTags(assetId, ownerId, result, previous);
-    const { faces, removed } = await this.applyFaces(assetId, ownerId, result, previous);
+    const { faces, removed } = await this.applyFaces(assetId, ownerId, camera ? null : result, previous);
 
     const marker: Marker = {
       model: result.model,
@@ -644,7 +647,8 @@ export class DanbooruService extends BaseService {
     return newIds;
   }
 
-  private async applyFaces(assetId: string, ownerId: string, result: TaggerResult, previous?: Marker) {
+  /** replace our faces on an image with new ones from `result`; `null` (camera photo) only removes ours */
+  private async applyFaces(assetId: string, ownerId: string, result: TaggerResult | null, previous?: Marker) {
     const records = new Map((previous?.faces ?? []).map((record) => [record.id, record]));
     const oldFormat = new Set(previous?.faceIds);
     const existing = await this.personRepository.getFaces(assetId, { viewingUserId: ownerId });
@@ -664,7 +668,7 @@ export class DanbooruService extends BaseService {
     for (const face of existing) {
       const record = records.get(face.id);
       const person = face.personGroupId ?? null;
-      if (record && (record.source === 'manual' || record.person !== person)) {
+      if (result && record && (record.source === 'manual' || record.person !== person)) {
         kept.push({ ...record, person, source: 'manual' });
         const entry = this.index.get(face.id);
         if (entry) {
@@ -686,6 +690,11 @@ export class DanbooruService extends BaseService {
       }
       await this.personRepository.deleteAssetFace(face.id);
       this.index.delete(face.id);
+    }
+    if (!result) {
+      await this.saveAssetIndex(assetId, ownerId);
+      await this.refreshFeaturePhotos(ownerId, affected);
+      return { faces: kept, removed };
     }
 
     const references = await this.referencesFor(ownerId);
@@ -864,6 +873,7 @@ export class DanbooruService extends BaseService {
   async maintenance() {
     this.pixaiPeople = await this.personRepository.getDanbooruPixaiPeople();
     await this.revealAutoHidden();
+    await this.stripCameraFaces();
     await this.deleteEmptyClusters();
     const owners = new Set(this.index.values().map(({ ownerId }) => ownerId));
     for (const ownerId of owners) {
@@ -873,6 +883,22 @@ export class DanbooruService extends BaseService {
           `${stats.matched} matched later, ${stats.clustered} grouped into ${stats.clusters} new unnamed people, ` +
           `${stats.left} still unassigned`,
       );
+    }
+  }
+
+  /** camera photos that joined the camera album after tagging lose their Danbooru faces */
+  private async stripCameraFaces() {
+    const assets = await this.assetRepository.getDanbooruCameraAssets(CAMERA_ALBUM);
+    for (const { id: assetId, ownerId } of assets) {
+      const row = await this.assetRepository.getMetadataByKey(assetId, DANBOORU_MARKER_KEY);
+      const marker = row?.value as Marker;
+      const { faces, removed } = await this.applyFaces(assetId, ownerId, null, marker);
+      await this.assetRepository.upsertMetadata(assetId, [
+        { key: DANBOORU_MARKER_KEY, value: { ...marker, faces, faceIds: faces.map(({ id }) => id), removed } },
+      ]);
+    }
+    if (assets.length > 0) {
+      this.logger.log(`Danbooru maintenance: removed the faces of ${assets.length} camera photos`);
     }
   }
 

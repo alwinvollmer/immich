@@ -110,6 +110,7 @@ describe(DanbooruService.name, () => {
     mocks.person.create.mockResolvedValue({} as never);
     mocks.person.getPeopleAssetCounts.mockResolvedValue([]);
     mocks.person.getDanbooruPixaiPeople.mockResolvedValue(new Set(['p-megumin', 'p-yunyun']));
+    mocks.asset.getDanbooruCameraAssets.mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -483,6 +484,43 @@ describe(DanbooruService.name, () => {
       ]);
     });
 
+    // custom: phone camera photos get tags, never Danbooru faces
+    it('tags a camera photo without creating faces and removes the faces it made before', async () => {
+      const box = [100, 50, 300, 250];
+      mocks.asset.getMetadataByKey.mockResolvedValue({
+        value: {
+          model: 'old',
+          at: '',
+          tagIds: [],
+          faceIds: ['f-1'],
+          faces: [{ id: 'f-1', person: 'p-yunyun', source: 'pixai', box }],
+        },
+      } as never);
+      mocks.tag.getAssetTagIds.mockResolvedValue([]);
+      mocks.person.getFaces.mockResolvedValue([
+        {
+          id: 'f-1',
+          personGroupId: 'p-megumin',
+          sourceType: SourceType.Manual,
+          imageWidth: 1000,
+          imageHeight: 800,
+          boundingBoxX1: 100,
+          boundingBoxY1: 50,
+          boundingBoxX2: 300,
+          boundingBoxY2: 250,
+        },
+      ] as never);
+
+      await sut.processAsset({ ...candidate, camera: true });
+
+      expect(mocks.tag.replaceAssetTags).toHaveBeenCalledWith('asset-1', ['t-1', 't-2', 't-3']);
+      expect(mocks.person.deleteAssetFace).toHaveBeenCalledExactlyOnceWith('f-1');
+      expect(mocks.person.createAssetFace).not.toHaveBeenCalled();
+      expect(mocks.asset.upsertMetadata).toHaveBeenCalledWith('asset-1', [
+        { key: DANBOORU_MARKER_KEY, value: expect.objectContaining({ faces: [], faceIds: [] }) },
+      ]);
+    });
+
     it('does not recreate a face the user deleted', async () => {
       mocks.asset.getMetadataByKey.mockResolvedValue({
         value: {
@@ -509,6 +547,45 @@ describe(DanbooruService.name, () => {
   });
 
   describe('maintenance', () => {
+    // custom: a camera photo that joined the camera album after tagging
+    it('removes the Danbooru faces of camera photos', async () => {
+      mocks.asset.getDanbooruCameraAssets.mockResolvedValue([{ id: 'asset-1', ownerId }]);
+      mocks.asset.getMetadataByKey.mockResolvedValue({
+        value: {
+          model: 'pixai-tagger-v1.0',
+          at: '',
+          tagIds: ['t-1'],
+          faceIds: ['f-1'],
+          faces: [{ id: 'f-1', person: 'p-megumin', source: 'pixai', box: [100, 50, 300, 250] }],
+        },
+      } as never);
+      mocks.person.getFaces.mockResolvedValue([
+        {
+          id: 'f-1',
+          personGroupId: 'p-megumin',
+          sourceType: SourceType.Manual,
+          imageWidth: 1000,
+          imageHeight: 800,
+          boundingBoxX1: 100,
+          boundingBoxY1: 50,
+          boundingBoxX2: 300,
+          boundingBoxY2: 250,
+        },
+      ] as never);
+      mocks.person.getFacePersons.mockResolvedValue([]);
+
+      await sut.maintenance();
+
+      expect(mocks.asset.getDanbooruCameraAssets).toHaveBeenCalledWith('Camera');
+      expect(mocks.person.deleteAssetFace).toHaveBeenCalledExactlyOnceWith('f-1');
+      expect(mocks.asset.upsertMetadata).toHaveBeenCalledWith('asset-1', [
+        {
+          key: DANBOORU_MARKER_KEY,
+          value: expect.objectContaining({ model: 'pixai-tagger-v1.0', tagIds: ['t-1'], faces: [], faceIds: [] }),
+        },
+      ]);
+    });
+
     it('pairs unassigned heads with the characters pixai named on the image', async () => {
       await loadIndex(sut, {
         refs: {
