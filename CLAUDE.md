@@ -57,12 +57,14 @@ Known local-only failures (also on pristine upstream, ignore):
    `ghcr.io/alwinvollmer/immich-server:v<server/package.json version>-custom-<7-char sha>` (~6 min,
    amd64, private package). Docs-only pushes (`**.md`) do not build. Watch with
    `gh run watch <id> -R alwinvollmer/immich --exit-status`.
-2. nieke (Windows, SSH lands in cmd.exe):
-   `docker --config C:\docker\immich\.docker pull ghcr.io/alwinvollmer/immich-server:<tag>`
-   (that config holds the read:packages token; the default credential helper fails over SSH).
-3. Change ONE line in `C:\docker\immich\.env`: `IMMICH_SERVER_IMAGE=…:<tag>` (CRLF file —
-   edit with a byte-exact replace, never sed).
-4. `cd C:\docker\immich && docker compose up -d --pull never immich-server`.
+2. nieke (CachyOS Linux since 2026-10-29; login shell fish → send bash via `ssh nieke bash -s <<'EOF'`):
+   `docker --config /srv/docker/immich/.docker pull ghcr.io/alwinvollmer/immich-server:<tag>`
+   (that config holds a classic read:packages token; renewed 2026-10-31 after the old one expired —
+   "denied" on pull = token expired: the user logs in again with
+   `ssh -t nieke 'docker --config /srv/docker/immich/.docker login ghcr.io -u alwinvollmer'`).
+3. Change ONE line in `/srv/docker/immich/.env`: `IMMICH_SERVER_IMAGE=…:<tag>` (LF now; edit with a
+   small Python replace, never `sed -i`).
+4. `cd /srv/docker/immich && docker compose up -d --pull never immich-server`.
 5. Verify: `GET /api/server/about` → `buildImage` = the tag; check `docker logs immich_server`.
    Schema-changing upstream updates: DB backup first (`POST /api/jobs {"name":"backup-database"}`).
 
@@ -72,12 +74,11 @@ merging a new upstream release. Back to stock = point `IMMICH_SERVER_IMAGE` at
 
 ## nieke / data rules
 
-- API: `http://192.168.1.249:2283/api`, key = `IMMICH_API_KEY` in
-  `C:\temp\claude-immich\retired\immich-api-worker\.env` (the retired worker's folder, moved out of
-  `C:\docker` 2026-10-21; read it per command; scratch files get wiped).
-- DB: write SQL to a file, `scp` to `C:\temp\claude-immich\`, `docker cp` into `immich_postgres`,
-  `psql -f` (inline quoting through cmd.exe is fragile).
-- Everything we generate on nieke goes to `C:\temp\claude-immich\` — never into `C:\docker\`.
+- API: `http://192.168.1.249:2283/api`. The API key file stayed behind on the Windows SSD
+  (`C:\temp\claude-immich\retired\immich-api-worker\.env`, mount only read-only) — not on Linux nieke yet.
+- DB: `ssh nieke bash -s` with `docker exec -i immich_postgres psql -U postgres -d immich <<'SQL' … SQL`.
+- Everything we generate on nieke goes to `~/claude-temp/immich/` — never into `/srv/docker/`.
+  (Windows-era files: `C:\temp\claude-immich\` on the old SSD.)
 - Bulk data changes (visibility, albums, trash, stacks): dry run first, save the affected ID
   list to `C:\temp\claude-immich\` for rollback, confirm with the user, test one item, then run.
 - Trash retention is 90 days.
