@@ -94,7 +94,10 @@
     })),
   );
 
-  memoryManager.setFilters({ $for: DateTime.now().toISODate() });
+  // custom: the memory lane follows the album chips too
+  $effect(() => {
+    memoryManager.setFilters({ $for: DateTime.now().toISODate(), albumIds: options.albumIds });
+  });
 </script>
 
 <UserPageLayout hideNavbar={assetMultiSelectManager.selectionActive} scrollbar={false}>

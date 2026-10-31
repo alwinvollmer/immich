@@ -18,6 +18,11 @@ const MemorySearchSchema = z
     size: z.coerce.number().int().min(1).optional().describe('Number of memories to return'),
     page: z.coerce.number().int().min(1).optional().describe('Page number'),
     order: AssetOrderWithRandomSchema.optional(),
+    // custom: the Photos page album filter
+    albumIds: z
+      .preprocess((val) => (typeof val === 'string' ? val.split(',') : val), z.array(z.uuidv4()))
+      .optional()
+      .describe('Only assets in ANY of these albums (comma-separated album IDs)'),
   })
   .meta({ id: 'MemorySearchDto' });
 

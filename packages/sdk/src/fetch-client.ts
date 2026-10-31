@@ -5759,7 +5759,8 @@ export function reverseGeocode({ lat, lon }: {
 /**
  * Retrieve memories
  */
-export function searchMemories({ $for, id, isSaved, isTrashed, isUpcoming, order, page, size, $type }: {
+export function searchMemories({ albumIds, $for, id, isSaved, isTrashed, isUpcoming, order, page, size, $type }: {
+    albumIds?: string[];
     $for?: string;
     id?: string;
     isSaved?: boolean;
@@ -5774,6 +5775,7 @@ export function searchMemories({ $for, id, isSaved, isTrashed, isUpcoming, order
         status: 200;
         data: MemoryResponseDto[];
     }>(`/memories${QS.query(QS.explode({
+        albumIds,
         "for": $for,
         id,
         isSaved,
@@ -5805,7 +5807,8 @@ export function createMemory({ memoryCreateDto }: {
 /**
  * Retrieve memories statistics
  */
-export function memoriesStatistics({ $for, id, isSaved, isTrashed, isUpcoming, order, page, size, $type }: {
+export function memoriesStatistics({ albumIds, $for, id, isSaved, isTrashed, isUpcoming, order, page, size, $type }: {
+    albumIds?: string[];
     $for?: string;
     id?: string;
     isSaved?: boolean;
@@ -5820,6 +5823,7 @@ export function memoriesStatistics({ $for, id, isSaved, isTrashed, isUpcoming, o
         status: 200;
         data: MemoryStatisticsResponseDto;
     }>(`/memories/statistics${QS.query(QS.explode({
+        albumIds,
         "for": $for,
         id,
         isSaved,

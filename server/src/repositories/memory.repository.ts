@@ -42,23 +42,37 @@ export class MemoryRepository implements IBulkAsset {
   }
 
   searchBuilder(ownerId: string, dto: MemorySearchDto) {
-    return this.db
-      .selectFrom('memory')
-      .$if(dto.isSaved !== undefined, (qb) => qb.where('isSaved', '=', dto.isSaved!))
-      .$if(dto.type !== undefined, (qb) => qb.where('type', '=', dto.type!))
-      .$if(dto.for !== undefined, (qb) =>
-        qb
-          .where((where) => where.or([where('showAt', 'is', null), where('showAt', '<=', dto.for!)]))
-          .where((where) => where.or([where('hideAt', 'is', null), where('hideAt', '>=', dto.for!)])),
-      )
-      .$if(dto.isUpcoming !== undefined, (qb) => {
-        const now = asLocalTime(DateTime.now());
-        return dto.isUpcoming
-          ? qb.where('showAt', '>', now)
-          : qb.where((where) => where.or([where('showAt', 'is', null), where('showAt', '<=', now)]));
-      })
-      .where('deletedAt', dto.isTrashed ? 'is not' : 'is', null)
-      .where('ownerId', '=', ownerId);
+    return (
+      this.db
+        .selectFrom('memory')
+        .$if(dto.isSaved !== undefined, (qb) => qb.where('isSaved', '=', dto.isSaved!))
+        .$if(dto.type !== undefined, (qb) => qb.where('type', '=', dto.type!))
+        .$if(dto.for !== undefined, (qb) =>
+          qb
+            .where((where) => where.or([where('showAt', 'is', null), where('showAt', '<=', dto.for!)]))
+            .where((where) => where.or([where('hideAt', 'is', null), where('hideAt', '>=', dto.for!)])),
+        )
+        .$if(dto.isUpcoming !== undefined, (qb) => {
+          const now = asLocalTime(DateTime.now());
+          return dto.isUpcoming
+            ? qb.where('showAt', '>', now)
+            : qb.where((where) => where.or([where('showAt', 'is', null), where('showAt', '<=', now)]));
+        })
+        // custom: the Photos page album filter — only memories with an asset in one of the albums
+        .$if(!!dto.albumIds?.length, (qb) =>
+          qb.where((eb) =>
+            eb.exists(
+              eb
+                .selectFrom('memory_asset')
+                .innerJoin('album_asset', 'album_asset.assetId', 'memory_asset.assetId')
+                .whereRef('memory_asset.memoriesId', '=', 'memory.id')
+                .where('album_asset.albumId', 'in', dto.albumIds!),
+            ),
+          ),
+        )
+        .where('deletedAt', dto.isTrashed ? 'is not' : 'is', null)
+        .where('ownerId', '=', ownerId)
+    );
   }
 
   @GenerateSql(
@@ -88,6 +102,17 @@ export class MemoryRepository implements IBulkAsset {
             .whereRef('memory_asset.memoriesId', '=', 'memory.id')
             .where('asset.visibility', '=', sql.lit(AssetVisibility.Timeline))
             .where('asset.deletedAt', 'is', null)
+            // custom: the Photos page album filter
+            .$if(!!dto.albumIds?.length, (qb) =>
+              qb.where((eb) =>
+                eb.exists(
+                  eb
+                    .selectFrom('album_asset')
+                    .whereRef('album_asset.assetId', '=', 'asset.id')
+                    .where('album_asset.albumId', 'in', dto.albumIds!),
+                ),
+              ),
+            )
             .where((eb) =>
               eb.not(
                 eb.exists(

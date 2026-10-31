@@ -110,6 +110,8 @@ merging a new upstream release. Back to stock = point `IMMICH_SERVER_IMAGE` at
   timelines request `withStacked`.
 - Photos album filter (`albumIds`, ANY semantics) with localStorage selection, default "Camera".
   Album-filtered timelines skip live websocket inserts (like `albumId` timelines).
+  The memory lane above the timeline follows the same chips (`GET /api/memories?albumIds=`: only assets in
+  those albums, memories without one dropped); the memory viewer reuses those filters, Explore does not.
 - Uploads into albums: drop files on a sidebar album or a Photos album chip (`use:albumDropTarget`;
   the global drop overlay is a click-through hint), or Ctrl+V → `PasteUploadModal` (optional album).
   Nothing is filed into Desktop automatically any more. Sidebar shows 5 recent albums.
