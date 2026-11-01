@@ -74,8 +74,9 @@ merging a new upstream release. Back to stock = point `IMMICH_SERVER_IMAGE` at
 
 ## nieke / data rules
 
-- API: `http://192.168.1.249:2283/api`. The API key file stayed behind on the Windows SSD
-  (`C:\temp\claude-immich\retired\immich-api-worker\.env`, mount only read-only) — not on Linux nieke yet.
+- API: `http://192.168.1.249:2283/api` (`http://localhost:2283/api` on nieke), key = `IMMICH_API_KEY` in
+  nieke `~/claude-temp/immich/immich-api.env` (mode 600, copied 2026-11-01 from the Windows SSD,
+  `/mnt/windows` read-only). Read it per command on nieke; never print it.
 - DB: `ssh nieke bash -s` with `docker exec -i immich_postgres psql -U postgres -d immich <<'SQL' … SQL`.
 - Everything we generate on nieke goes to `~/claude-temp/immich/` — never into `/srv/docker/`.
   (Windows-era files: `C:\temp\claude-immich\` on the old SSD.)
